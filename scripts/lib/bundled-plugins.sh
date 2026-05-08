@@ -235,29 +235,45 @@ patch_browser_use_site_status_allowlist_fallback() {
 
     python3 - "$client" <<'PY'
 from pathlib import Path
+import re
 import sys
 
 path = Path(sys.argv[1])
 source = path.read_text(encoding="utf-8")
-needle = (
-    'async fetchBlocked(t){let n=await MT(t.endpoint,{method:"GET"});'
-    'if(!n.ok)throw new Error(Rt(`Browser Use cannot determine if ${t.displayUrl} is allowed. '
-    'Please try again later or use another source.`));let r=await n.json();return R7(r)}'
+pattern = re.compile(
+    r'async fetchBlocked\((?P<url>[A-Za-z_$][\w$]*)\)\{'
+    r'let (?P<response>[A-Za-z_$][\w$]*)=await (?P<fetch>[A-Za-z_$][\w$]*)'
+    r'\((?P=url)\.endpoint,\{method:"GET"\}\);'
+    r'if\(!(?P=response)\.ok\)throw new Error\((?P<format>[A-Za-z_$][\w$]*)'
+    r'\(`Browser Use cannot determine if \$\{(?P=url)\.displayUrl\} is allowed\. '
+    r'Please try again later or use another source\.`\)\);'
+    r'let (?P<json>[A-Za-z_$][\w$]*)=await (?P=response)\.json\(\);'
+    r'return (?P<status>[A-Za-z_$][\w$]*)\((?P=json)\)\}'
 )
-replacement = (
-    'async fetchBlocked(t){let n;try{n=await MT(t.endpoint,{method:"GET"})}catch(r){'
-    'if(String(t?.endpoint??"").includes("/aura/site_status")&&String(r?.message??r).includes("URL is not allowlisted"))return console.warn'
-    '("codexLinuxSiteStatusAllowlistFallback",t.endpoint),!1;throw r}'
-    'if(!n.ok)throw new Error(Rt(`Browser Use cannot determine if ${t.displayUrl} is allowed. '
-    'Please try again later or use another source.`));let r=await n.json();return R7(r)}'
-)
-if needle not in source:
+match = pattern.search(source)
+if match is None:
     print(
         "WARN: Could not find Browser Use site_status allowlist fallback insertion point — leaving browser-client.mjs unchanged",
         file=sys.stderr,
     )
     raise SystemExit(0)
-path.write_text(source.replace(needle, replacement, 1), encoding="utf-8")
+
+url = match.group("url")
+response = match.group("response")
+fetch = match.group("fetch")
+formatter = match.group("format")
+json_value = match.group("json")
+status = match.group("status")
+error = "__codexLinuxErr"
+replacement = (
+    f'async fetchBlocked({url}){{let {response};try{{{response}=await {fetch}({url}.endpoint,{{method:"GET"}})}}'
+    f'catch({error}){{if(String({url}?.endpoint??"").includes("/aura/site_status")&&'
+    f'String({error}?.message??{error}).toLowerCase().includes("allowlist"))return console.warn'
+    f'("codexLinuxSiteStatusAllowlistFallback",{url}.endpoint),!1;throw {error}}}'
+    f'if(!{response}.ok)throw new Error({formatter}(`Browser Use cannot determine if ${{{url}.displayUrl}} is allowed. '
+    f'Please try again later or use another source.`));let {json_value}=await {response}.json();return {status}({json_value})}}'
+)
+path.write_text(source[:match.start()] + replacement + source[match.end():], encoding="utf-8")
 PY
 }
 

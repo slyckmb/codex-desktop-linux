@@ -61,7 +61,7 @@ JSON
 {"name":"browser-use","version":"0.1.0-alpha1"}
 JSON
     cat > "$resources_dir/plugins/openai-bundled/plugins/browser-use/scripts/browser-client.mjs" <<'JS'
-class Wm{async fetchBlocked(t){let n=await MT(t.endpoint,{method:"GET"});if(!n.ok)throw new Error(Rt(`Browser Use cannot determine if ${t.displayUrl} is allowed. Please try again later or use another source.`));let r=await n.json();return R7(r)}}export function setupAtlasRuntime() {}
+class Uf{async fetchBlocked(e){let r=await bS(e.endpoint,{method:"GET"});if(!r.ok)throw new Error(ae(`Browser Use cannot determine if ${e.displayUrl} is allowed. Please try again later or use another source.`));let n=await r.json();return TF(n)}}export function setupAtlasRuntime() {}
 JS
 }
 
