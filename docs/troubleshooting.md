@@ -7,6 +7,7 @@
 | `ERR_CONNECTION_REFUSED` on the webview port | Ensure `python3` works and the configured port is free |
 | Stuck on Codex logo splash | Check `~/.cache/codex-desktop/launcher.log`; another process may be serving the webview port |
 | `CODEX_CLI_PATH` error | Reopen the app to retry automatic CLI install, or install manually with `npm i -g @openai/codex` / `npm i -g --prefix ~/.local @openai/codex` |
+| `nix run` exits with no window or terminal output | Check `~/.cache/codex-desktop/launcher.log`; the Nix package still requires a user-provided `codex` CLI |
 | `gh auth status` works in terminal but fails inside Codex Desktop | See [GitHub CLI auth in app-launched shells](github-cli-auth.md) |
 | Electron hangs while CLI is outdated | Re-run the launcher and check `~/.cache/codex-desktop/launcher.log` plus `~/.local/state/codex-update-manager/service.log` |
 | GPU / Vulkan / Wayland errors | Try `CODEX_LINUX_RENDERING_MODE=wayland-gpu ./codex-app/start.sh` |

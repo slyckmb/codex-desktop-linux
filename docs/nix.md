@@ -11,6 +11,24 @@ bot refreshes the upstream `Codex.dmg` hash and verifies the Nix package outputs
 in `main`. If you hit a hash mismatch right after an upstream release, wait for
 the next bot run and retry.
 
+## Codex CLI Requirement
+
+The Nix package does not install the Codex CLI for you. Before first launch,
+make sure the `codex` command is available in your user environment, or set
+`CODEX_CLI_PATH` to the binary you want Codex Desktop to use.
+
+One option is the upstream npm package:
+
+```bash
+npm i -g @openai/codex
+```
+
+If `nix run` appears to do nothing, check the launcher log first:
+
+```bash
+sed -n '1,220p' ~/.cache/codex-desktop/launcher.log
+```
+
 ## Feature Outputs
 
 Flakes do not include the git-ignored `linux-features/features.json` opt-in
