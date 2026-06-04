@@ -23,3 +23,6 @@ graphify-out/
 
 # Agent baseline (runtime, not tracked)
 .agent/
+AGENTS.override.md
+CLAUDE.md
+SESSION.md
