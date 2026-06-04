@@ -288,10 +288,27 @@ preferred_gui_prompt_package() {
 install_apt() {
     info "Detected Debian/Ubuntu (apt)"
     sudo apt-get update -qq
-    sudo apt-get install -y \
+    # apt-get may exit non-zero when unrelated packages (e.g. NVIDIA kernel modules)
+    # have a pre-existing broken dpkg state. Tolerate that and verify the tools we
+    # actually need are present before continuing.
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
         ca-certificates python3 \
         p7zip-full curl unzip \
-        build-essential
+        build-essential \
+    || {
+        warn "apt-get install reported an error (possibly due to unrelated broken packages)"
+        local missing=()
+        command -v python3 >/dev/null 2>&1 || missing+=(python3)
+        command -v curl    >/dev/null 2>&1 || missing+=(curl)
+        command -v unzip   >/dev/null 2>&1 || missing+=(unzip)
+        command -v gcc     >/dev/null 2>&1 || missing+=(gcc)
+        command -v make    >/dev/null 2>&1 || missing+=(make)
+        if [ "${#missing[@]}" -gt 0 ]; then
+            error "Required tools are missing after apt-get failure: ${missing[*]}
+Fix the package manager state first: sudo apt-get install -f"
+        fi
+        warn "All required tools are available; continuing despite apt-get error."
+    }
 }
 
 install_dnf5() {
