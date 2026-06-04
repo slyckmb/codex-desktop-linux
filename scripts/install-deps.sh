@@ -350,7 +350,13 @@ install_gui_prompt_helper() {
 
     case "$DISTRO" in
         apt)
-            sudo apt-get install -y "$package"
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "$package" \
+            || {
+                warn "apt-get install of '$package' reported an error (possibly due to unrelated broken packages)"
+                if ! dpkg -l "$package" 2>/dev/null | grep -q '^ii'; then
+                    warn "GUI prompt helper '$package' could not be installed; continuing without it."
+                fi
+            }
             ;;
         dnf5)
             sudo dnf install -y "$package"
