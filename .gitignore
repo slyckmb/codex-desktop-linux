@@ -20,3 +20,6 @@ linux-features/local/
 # graphify
 graphify-out/
 .graphify_*
+
+# Agent baseline (runtime, not tracked)
+.agent/
