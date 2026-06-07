@@ -334,7 +334,7 @@ fetch-upstream:
 
 rebase-upstream:
 	@echo "[make] Rebasing main onto upstream/main"
-	git -C "$(MAIN_WORKTREE)" rebase upstream/main
+	git -C "$(MAIN_WORKTREE)" rebase --rebase-merges upstream/main
 
 push-origin:
 	@echo "[make] Pushing main to origin"
