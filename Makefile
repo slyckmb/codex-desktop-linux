@@ -24,6 +24,8 @@ RPM_GLOB := $(CURDIR)/dist/$(PACKAGE_NAME)-*.rpm
 PACMAN_GLOB := $(CURDIR)/dist/$(PACKAGE_NAME)-[0-9]*.pkg.tar.*
 .DEFAULT_GOAL := help
 
+MAIN_WORKTREE := $(shell git worktree list --porcelain | grep '^worktree ' | head -1 | sed 's/^worktree //')
+
 NATIVE_PKG_FORMAT_CMD = format=""; \
 os_release_token_match() { \
 	local expected token; \
@@ -60,7 +62,7 @@ if [ -z "$$format" ]; then \
 fi; \
 printf '%s\n' "$$format"
 
-.PHONY: help check test build-updater maybe-build-updater update rebuild rebuild-install inspect-upstream build-app build-app-fresh setup-native bootstrap-native install-native update-native rebuild-next run-app build-dev-app run-dev-app deb rpm pacman appimage package install service-enable service-status clean-dist clean-state
+.PHONY: help check test build-updater maybe-build-updater update rebuild rebuild-install inspect-upstream build-app build-app-fresh setup-native bootstrap-native install-native update-native rebuild-next run-app build-dev-app run-dev-app deb rpm pacman appimage package install service-enable service-status clean-dist clean-state sync-upstream fetch-upstream rebase-upstream push-origin
 
 help:
 	@printf '\nCodex Desktop Linux Make Targets\n\n'
@@ -87,6 +89,10 @@ help:
 	@printf '  %-18s %s\n' "make appimage" "Build the AppImage into dist/ (local self-build)"
 	@printf '  %-18s %s\n' "make package" "Build native package (auto-detects deb, rpm, or pacman)"
 	@printf '  %-18s %s\n' "make install" "Install the latest generated native package"
+	@printf '  %-18s %s\n' "make sync-upstream" "Fetch upstream, rebase main onto upstream/main, push main"
+	@printf '  %-18s %s\n' "make fetch-upstream" "Fetch upstream remote (ilysenko/codex-desktop-linux)"
+	@printf '  %-18s %s\n' "make rebase-upstream" "Rebase main onto upstream/main (fetch first)"
+	@printf '  %-18s %s\n' "make push-origin" "Push main branch to origin (force-with-lease)"
 	@printf '  %-18s %s\n' "make service-enable" "Enable and start codex-update-manager.service for the current user"
 	@printf '  %-18s %s\n' "make service-status" "Show codex-update-manager.service status for the current user"
 	@printf '  %-18s %s\n' "make clean-dist" "Remove generated dist/ artifacts"
@@ -316,6 +322,23 @@ service-enable:
 service-status:
 	@echo "[make] Showing codex-update-manager.service status"
 	systemctl --user status codex-update-manager.service --no-pager
+
+sync-upstream:
+	@$(MAKE) fetch-upstream
+	@$(MAKE) rebase-upstream
+	@$(MAKE) push-origin
+
+fetch-upstream:
+	@echo "[make] Fetching upstream"
+	git fetch upstream
+
+rebase-upstream:
+	@echo "[make] Rebasing main onto upstream/main"
+	git -C "$(MAIN_WORKTREE)" rebase upstream/main
+
+push-origin:
+	@echo "[make] Pushing main to origin"
+	git push --force-with-lease origin main
 
 clean-dist:
 	@echo "[make] Removing dist/"
