@@ -11,19 +11,23 @@ APPDIR="${APPIMAGE_APPDIR_OVERRIDE:-$REPO_DIR/dist/appimage.AppDir}"
 APPRUN_TEMPLATE="$REPO_DIR/packaging/appimage/AppRun"
 DESKTOP_TEMPLATE="$REPO_DIR/packaging/appimage/codex-desktop.desktop"
 APPIMAGE_RUNTIME_TEMPLATE="$REPO_DIR/packaging/appimage/codex-appimage-runtime.sh"
-ICON_SOURCE="$REPO_DIR/assets/codex.png"
-
 PACKAGE_NAME="${PACKAGE_NAME:-codex-desktop}"
-PACKAGE_DISPLAY_NAME="${PACKAGE_DISPLAY_NAME:-Codex Desktop}"
-PACKAGE_COMMENT="${PACKAGE_COMMENT:-Run Codex Desktop on Linux}"
+PACKAGE_DISPLAY_NAME="${PACKAGE_DISPLAY_NAME:-ChatGPT Community}"
+PACKAGE_COMMENT="${PACKAGE_COMMENT:-Community Linux distribution based on OpenAI ChatGPT}"
 PACKAGE_VERSION="${PACKAGE_VERSION:-$(date -u +%Y.%m.%d.%H%M%S)}"
+ICON_SOURCE="$(resolve_package_icon_source)"
 
 map_arch() {
     case "$(uname -m)" in
-        x86_64)  echo "x86_64" ;;
-        aarch64|arm64) echo "aarch64" ;;
-        armv7l|armhf) echo "armhf" ;;
-        *)       error "Unsupported AppImage architecture: $(uname -m)" ;;
+        x86_64)
+            assert_official_payload_architecture amd64
+            echo "x86_64"
+            ;;
+        aarch64|arm64)
+            assert_official_payload_architecture arm64
+            echo "aarch64"
+            ;;
+        *) error "Unsupported AppImage architecture: $(uname -m) (official packages support amd64 and arm64 only)" ;;
     esac
 }
 
@@ -61,6 +65,7 @@ render_template() {
 }
 
 prepare_appdir() {
+    local arch="$1"
     info "Preparing AppDir at $APPDIR"
     rm -rf "$APPDIR"
     mkdir -p \
@@ -82,11 +87,14 @@ prepare_appdir() {
     cp "$ICON_SOURCE" "$APPDIR/.DirIcon"
     cp "$ICON_SOURCE" "$APPDIR/usr/share/icons/hicolor/256x256/apps/$PACKAGE_NAME.png"
     cp "$ICON_SOURCE" "$APPDIR/opt/$PACKAGE_NAME/.codex-linux/$PACKAGE_NAME.png"
+    cp "$ICON_SOURCE" "$APPDIR/opt/$PACKAGE_NAME/resources/icon-chatgpt.png"
 
     render_template \
         "$APPIMAGE_RUNTIME_TEMPLATE" \
         "$APPDIR/opt/$PACKAGE_NAME/.codex-linux/codex-packaged-runtime.sh"
     chmod 0644 "$APPDIR/opt/$PACKAGE_NAME/.codex-linux/codex-packaged-runtime.sh"
+    normalize_package_payload_permissions "$APPDIR"
+    restore_linux_feature_payload_permissions "$APPDIR"
 }
 
 main() {
@@ -97,14 +105,20 @@ main() {
     ensure_file_exists "$ICON_SOURCE" "icon"
 
     local arch
-    local appimagetool
     local output_file
     arch="$(map_arch)"
-    appimagetool="$(resolve_appimagetool)"
     output_file="$DIST_DIR/${PACKAGE_NAME}-${PACKAGE_VERSION}-${arch}.AppImage"
 
-    prepare_appdir
+    prepare_appdir "$arch"
 
+    if [ "${APPIMAGE_STAGE_ONLY:-0}" = "1" ]; then
+        info "AppImage staging complete: $APPDIR"
+        printf '%s\n' "$APPDIR"
+        return 0
+    fi
+
+    local appimagetool
+    appimagetool="$(resolve_appimagetool)"
     mkdir -p "$DIST_DIR"
     rm -f "$output_file"
     info "Building AppImage: $output_file"

@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Guided, conservative setup helper for native Codex Desktop Linux builds.
+# Guided, conservative setup helper for native ChatGPT Community builds.
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 FEATURES_ROOT="${CODEX_LINUX_FEATURES_ROOT:-$REPO_DIR/linux-features}"
 PACKAGE_NAME="${PACKAGE_NAME:-codex-desktop}"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/linux-target-detect.sh"
 SETUP_ERROR_REPORTED=0
 COLOR_RESET=""
 COLOR_BOLD=""
@@ -187,94 +189,6 @@ feature_config_path() {
     fi
 }
 
-os_release_field() {
-    local field="$1"
-    local file line value
-
-    for file in ${OS_RELEASE_FILE:-} /etc/os-release /usr/lib/os-release; do
-        [ -n "$file" ] || continue
-        [ -r "$file" ] || continue
-        while IFS= read -r line; do
-            case "$line" in
-                "$field="*)
-                    value="${line#*=}"
-                    value="${value#\"}"
-                    value="${value%\"}"
-                    value="${value#\'}"
-                    value="${value%\'}"
-                    printf '%s\n' "${value,,}"
-                    return 0
-                    ;;
-            esac
-        done < "$file"
-    done
-
-    return 1
-}
-
-os_release_matches() {
-    local expected token
-    for expected in "$@"; do
-        [ "${OS_RELEASE_ID:-}" = "$expected" ] && return 0
-        for token in ${OS_RELEASE_ID_LIKE:-}; do
-            [ "$token" = "$expected" ] && return 0
-        done
-    done
-    return 1
-}
-
-detect_package_manager() {
-    if os_release_matches debian ubuntu linuxmint pop elementary zorin && command -v apt-get >/dev/null 2>&1; then
-        echo "apt"
-    elif os_release_matches arch archlinux manjaro endeavouros artix && command -v pacman >/dev/null 2>&1; then
-        echo "pacman"
-    elif os_release_matches opensuse suse sles && command -v zypper >/dev/null 2>&1; then
-        echo "zypper"
-    elif os_release_matches fedora rhel centos rocky almalinux ol; then
-        if command -v dnf5 >/dev/null 2>&1; then
-            echo "dnf5"
-        elif command -v dnf >/dev/null 2>&1; then
-            echo "dnf"
-        else
-            echo "unknown"
-        fi
-    elif command -v apt-get >/dev/null 2>&1; then
-        echo "apt"
-    elif command -v dnf5 >/dev/null 2>&1; then
-        echo "dnf5"
-    elif command -v dnf >/dev/null 2>&1; then
-        echo "dnf"
-    elif command -v pacman >/dev/null 2>&1; then
-        echo "pacman"
-    elif command -v zypper >/dev/null 2>&1; then
-        echo "zypper"
-    else
-        echo "unknown"
-    fi
-}
-
-detect_package_format() {
-    if os_release_matches arch archlinux manjaro endeavouros artix; then
-        echo "pacman"
-    elif os_release_matches fedora rhel centos rocky almalinux ol sles suse opensuse; then
-        echo "rpm"
-    elif os_release_matches debian ubuntu linuxmint pop elementary zorin; then
-        echo "deb"
-    elif command -v pacman >/dev/null 2>&1 && ! command -v dpkg-deb >/dev/null 2>&1; then
-        echo "pacman"
-    elif command -v rpmbuild >/dev/null 2>&1 && ! command -v dpkg-deb >/dev/null 2>&1; then
-        echo "rpm"
-    elif command -v dpkg-deb >/dev/null 2>&1; then
-        echo "deb"
-    elif command -v rpmbuild >/dev/null 2>&1; then
-        echo "rpm"
-    elif command -v pacman >/dev/null 2>&1; then
-        echo "pacman"
-    else
-        echo "unknown"
-    fi
-}
-
 command_status() {
     local name="$1"
     if command -v "$name" >/dev/null 2>&1; then
@@ -353,6 +267,9 @@ install_command_for_packages() {
             ;;
         dnf)
             printf 'sudo dnf install %s' "$packages"
+            ;;
+        rpm-ostree)
+            printf 'sudo rpm-ostree install %s' "$packages"
             ;;
         pacman)
             printf 'sudo pacman -S %s' "$packages"
@@ -630,12 +547,17 @@ print_system_summary() {
     OS_RELEASE_ID="$(os_release_field ID 2>/dev/null || true)"
     OS_RELEASE_ID_LIKE="$(os_release_field ID_LIKE 2>/dev/null || true)"
     OS_RELEASE_VERSION_ID="$(os_release_field VERSION_ID 2>/dev/null || true)"
+    local atomic_host="no"
+    if linux_target_is_atomic; then
+        atomic_host="yes"
+    fi
 
-    info "Codex Desktop Linux guided setup"
+    info "ChatGPT Community guided setup"
     info "Repository: $REPO_DIR"
     info "Distro: ID=${OS_RELEASE_ID:-unknown} ID_LIKE=${OS_RELEASE_ID_LIKE:-unknown} VERSION_ID=${OS_RELEASE_VERSION_ID:-unknown}"
     info "Package manager: $(detect_package_manager)"
     info "Native package format: $(detect_package_format)"
+    info "Atomic host: $atomic_host"
     info "Session: XDG_CURRENT_DESKTOP=${XDG_CURRENT_DESKTOP:-unknown} DESKTOP_SESSION=${DESKTOP_SESSION:-unknown} XDG_SESSION_TYPE=${XDG_SESSION_TYPE:-unknown} WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-none} DISPLAY=${DISPLAY:-none}"
     info "Helpers: pkexec=$(command_status pkexec) kdialog=$(command_status kdialog) zenity=$(command_status zenity)"
     info "Computer Use readiness: ydotool=$(command_status ydotool) ydotoold=$(command_status ydotoold) ydotoold.service(system)=[$(service_state ydotoold.service system)] ydotoold.service(user)=[$(service_state ydotoold.service user)] ydotool.service(system)=[$(service_state ydotool.service system)] ydotool.service(user)=[$(service_state ydotool.service user)] socket=$(ydotool_socket_summary) portal=$(portal_summary)"
@@ -777,6 +699,10 @@ def discover_features(root):
             die(f"Linux feature '{feature_id}' must include README.md next to feature.json")
         if data.get("defaultEnabled") is True:
             die(f"Linux feature '{feature_id}' must be disabled by default; defaultEnabled true is not allowed")
+        if "internal" in data and not isinstance(data["internal"], bool):
+            die(f"Linux feature '{feature_id}' internal must be a boolean")
+        if data.get("internal") is True:
+            continue
         if feature_id in features:
             die(f"Duplicate Linux feature id '{feature_id}' in {manifest_path} and {features[feature_id]['manifest_path']}")
         title = data.get("title") or data.get("name") or feature_id
@@ -793,15 +719,17 @@ def discover_features(root):
         }
     return dict(sorted(features.items()))
 
-def read_enabled_ids(path):
+def read_feature_config(path):
     if not path.exists():
         fallback = features_root / "features.example.json"
         if fallback.exists():
-            data = read_json(fallback, "Linux features example config") or {}
+            return read_json(fallback, "Linux features example config") or {}
         else:
-            return []
+            return {}
     else:
-        data = read_json(path, "Linux features config") or {}
+        return read_json(path, "Linux features config") or {}
+
+def read_enabled_ids(data, path):
     enabled = data.get("enabled", [])
     if not isinstance(enabled, list):
         die(f"Linux features config {path} must contain an enabled array")
@@ -818,8 +746,48 @@ def read_enabled_ids(path):
 def csv(ids):
     return ", ".join(ids) if ids else "none"
 
+def expand_enabled(ids):
+    expanded = []
+    completed = set()
+    visiting = []
+
+    def visit(feature_id):
+        if feature_id in completed:
+            return
+        if feature_id in visiting:
+            cycle = visiting[visiting.index(feature_id):] + [feature_id]
+            die(f"Linux feature dependency cycle: {' -> '.join(cycle)}")
+        visiting.append(feature_id)
+        feature = features.get(feature_id)
+        if feature is not None:
+            for required in feature["requires"]:
+                visit(required)
+        visiting.pop()
+        completed.add(feature_id)
+        expanded.append(feature_id)
+
+    for feature_id in ids:
+        visit(feature_id)
+    return expanded
+
+def disabled_with_dependents(ids):
+    disabled = set(ids)
+    changed = True
+    while changed:
+        changed = False
+        for feature_id, feature in features.items():
+            if feature_id not in disabled and any(
+                required in disabled for required in feature["requires"]
+            ):
+                disabled.add(feature_id)
+                changed = True
+    return disabled
+
 features = discover_features(features_root)
-current = read_enabled_ids(config_path)
+config_data = read_feature_config(config_path)
+if not isinstance(config_data, dict):
+    die(f"Linux features config {config_path} must be a JSON object")
+current = expand_enabled(read_enabled_ids(config_data, config_path))
 
 if output_mode == "tsv":
     # Machine-readable discovery for the GUI feature picker: one
@@ -844,10 +812,10 @@ for feature_id in disable:
     if feature_id not in features and feature_id not in current:
         die(f"Unknown Linux feature id: {feature_id}")
 
-final = [feature_id for feature_id in current if feature_id not in set(disable)]
-for feature_id in enable:
-    if feature_id not in final:
-        final.append(feature_id)
+disabled = disabled_with_dependents(disable)
+final = [feature_id for feature_id in current if feature_id not in disabled]
+final = expand_enabled(final + enable)
+final = [feature_id for feature_id in final if feature_id not in disabled]
 
 final_set = set(final)
 for feature_id in final:
@@ -863,7 +831,9 @@ for feature_id in final:
 
 if apply_changes and (enable or disable):
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(json.dumps({"enabled": final}, indent=2) + "\n")
+    updated_config = dict(config_data)
+    updated_config["enabled"] = final
+    config_path.write_text(json.dumps(updated_config, indent=2) + "\n")
     print(f"[setup] Updated Linux feature config: {config_path}")
 elif not config_path.exists():
     print(f"[setup] Linux feature config: {config_path} (not created yet)")
@@ -876,9 +846,6 @@ unknown_enabled = [feature_id for feature_id in final if feature_id not in featu
 if unknown_enabled:
     warn(f"Enabled feature ids not found in this checkout: {csv(unknown_enabled)}")
 
-if "conversation-mode" in final and "read-aloud" not in final:
-    warn("conversation-mode is enabled without read-aloud; speech output requires the Read Aloud feature.")
-
 if features:
     print("[setup] Available Linux features:")
     for index, (feature_id, feature) in enumerate(features.items(), start=1):
@@ -890,7 +857,7 @@ else:
     print("[setup] Available Linux features: none found")
 
 if apply_changes and (enable or disable):
-    print("[setup] Feature changes apply after rebuilding and reinstalling Codex Desktop Linux.")
+    print("[setup] Feature changes apply after rebuilding and reinstalling ChatGPT Community.")
 PY
     then
         SETUP_ERROR_REPORTED=1
@@ -918,14 +885,13 @@ print_safe_disable_guidance() {
 
     if list_includes_id "$disable_raw" "remote-mobile-control"; then
         local config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
-        local key_file="$config_home/codex-desktop/remote-control-device-keys-v1.json"
+        local key_file="$config_home/codex-desktop/remote-control-device-keys/remote-control-device-keys-v1.json"
         info "Remote mobile control opt-out: Not deleting $key_file."
         info "Revoke paired devices from Codex Settings/Connections or ChatGPT before deleting local keys manually."
     fi
 
     if list_includes_id "$disable_raw" "read-aloud" ||
-        list_includes_id "$disable_raw" "read-aloud-mcp" ||
-        list_includes_id "$disable_raw" "conversation-mode"; then
+        list_includes_id "$disable_raw" "read-aloud-mcp"; then
         local data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
         local read_aloud_data="$data_home/codex-desktop/read-aloud"
         local read_aloud_model
@@ -948,7 +914,7 @@ validate_cleanup_feature_ids() {
     raw="${raw//,/ }"
     for item in $raw; do
         case "$item" in
-            remote-mobile-control|read-aloud|read-aloud-mcp|conversation-mode)
+            remote-mobile-control|read-aloud|read-aloud-mcp)
                 ;;
             "")
                 ;;
@@ -1042,14 +1008,13 @@ run_feature_cleanup() {
 
     if list_includes_id "$cleanup_raw" "remote-mobile-control"; then
         local config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
-        local key_file="$config_home/codex-desktop/remote-control-device-keys-v1.json"
+        local key_file="$config_home/codex-desktop/remote-control-device-keys/remote-control-device-keys-v1.json"
         info "Remote mobile control cleanup: revoke paired devices in Codex Settings/Connections or ChatGPT before deleting local keys."
         confirm_and_delete_path "$key_file"
     fi
 
     if list_includes_id "$cleanup_raw" "read-aloud" ||
-        list_includes_id "$cleanup_raw" "read-aloud-mcp" ||
-        list_includes_id "$cleanup_raw" "conversation-mode"; then
+        list_includes_id "$cleanup_raw" "read-aloud-mcp"; then
         local data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
         local read_aloud_data="$data_home/codex-desktop/read-aloud"
         local read_aloud_model
@@ -1200,7 +1165,7 @@ prompt_for_feature_changes_gui() {
             rows+=("$id" "${title_of[$id]}")
         done
         selected="$(zenity --list --checklist \
-            --title="Codex Desktop Linux features" \
+            --title="ChatGPT Community features" \
             --text="Select the optional Linux features to enable for the next build." \
             --column="Enable" --column="Feature" --column="Description" \
             --print-column=2 --separator=$'\n' \

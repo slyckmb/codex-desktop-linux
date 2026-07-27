@@ -4,11 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const {
   findCodexRequestWebviewAsset,
-  findImportedAsset,
-  findRequiredWebviewAsset,
-  requireName,
-} = require("../../scripts/patches/shared.js");
-
+} = require("../../scripts/patches/lib/assets.js");
 const SETTINGS_ASSET = "agent-workspaces-linux.js";
 const SETTINGS_SLUG = "agent-workspaces";
 const SETTINGS_COMMAND_KEY = "codex-linux-agent-workspace-command";
@@ -18,11 +14,17 @@ function warn(message, patchName) {
   console.warn(`WARN: ${message} - skipping ${patchName}`);
 }
 
+const NODE_MODULE_EXPRESSIONS = Object.freeze({
+  childProcessVar: 'require("node:child_process")',
+  fsVar: 'require("node:fs")',
+  pathVar: 'require("node:path")',
+});
+
 function agentWorkspaceAppPickerBridgeSource({ fsVar, pathVar }) {
   return [
-    `"linux-agent-workspace-pick-app":async()=>{let __codexElectron;try{__codexElectron=require("electron")}catch(e){return{ok:!1,action:"pickStartupApp",message:"file picker unavailable"}}`,
+    `"linux-agent-workspace-pick-app":async()=>{let __codexFsModule=${fsVar},__codexPathModule=${pathVar},__codexElectron;try{__codexElectron=require("electron")}catch(e){return{ok:!1,action:"pickStartupApp",message:"file picker unavailable"}}`,
     `let __codexDesktopTokens=e=>{let t=[],n="",r=null,a=!1,o=String(e||"");for(let i=0;i<o.length;i++){let c=o[i];if(a){n+=c,a=!1;continue}if(c==="\\\\"){a=!0;continue}if(r){if(c===r)r=null;else n+=c;continue}if(c==="'"||c==='"'){r=c;continue}if(/\\s/.test(c)){if(n)t.push(n),n="";continue}n+=c}if(a)n+="\\\\";if(n)t.push(n);return t};`,
-    `let __codexDesktopEntry=__codexPath=>{if(typeof __codexPath!=="string"||!__codexPath.endsWith(".desktop"))return null;try{let __codexText=${fsVar}.readFileSync(__codexPath,"utf8"),__codexInEntry=!1,__codexName=null,__codexExec=null;for(let __codexLine of __codexText.split(/\\r?\\n/)){let __codexTrimmed=__codexLine.trim();if(!__codexTrimmed||__codexTrimmed.startsWith("#"))continue;if(__codexTrimmed.startsWith("[")&&__codexTrimmed.endsWith("]")){__codexInEntry=__codexTrimmed==="[Desktop Entry]";continue}if(!__codexInEntry)continue;let __codexEquals=__codexTrimmed.indexOf("=");if(__codexEquals<1)continue;let __codexKey=__codexTrimmed.slice(0,__codexEquals),__codexValue=__codexTrimmed.slice(__codexEquals+1).trim();if((__codexKey==="Name"||__codexKey.startsWith("Name["))&&!__codexName)__codexName=__codexValue;else if(__codexKey==="Exec"&&!__codexExec)__codexExec=__codexValue}if(!__codexExec)return null;let __codexPercent="__CODEX_PERCENT__",__codexCleanExec=__codexExec.replace(/%%/g,__codexPercent).replace(/%[A-Za-z]/g,"").replace(new RegExp(__codexPercent,"g"),"%").trim(),__codexCommand=__codexDesktopTokens(__codexCleanExec);return __codexCommand.length?{name:__codexName||${pathVar}.basename(__codexPath,".desktop"),command:__codexCommand,desktop_file:__codexPath}:null}catch{return null}};`,
+    `let __codexDesktopEntry=__codexPath=>{if(typeof __codexPath!=="string"||!__codexPath.endsWith(".desktop"))return null;try{let __codexText=__codexFsModule.readFileSync(__codexPath,"utf8"),__codexInEntry=!1,__codexName=null,__codexExec=null;for(let __codexLine of __codexText.split(/\\r?\\n/)){let __codexTrimmed=__codexLine.trim();if(!__codexTrimmed||__codexTrimmed.startsWith("#"))continue;if(__codexTrimmed.startsWith("[")&&__codexTrimmed.endsWith("]")){__codexInEntry=__codexTrimmed==="[Desktop Entry]";continue}if(!__codexInEntry)continue;let __codexEquals=__codexTrimmed.indexOf("=");if(__codexEquals<1)continue;let __codexKey=__codexTrimmed.slice(0,__codexEquals),__codexValue=__codexTrimmed.slice(__codexEquals+1).trim();if((__codexKey==="Name"||__codexKey.startsWith("Name["))&&!__codexName)__codexName=__codexValue;else if(__codexKey==="Exec"&&!__codexExec)__codexExec=__codexValue}if(!__codexExec)return null;let __codexPercent="__CODEX_PERCENT__",__codexCleanExec=__codexExec.replace(/%%/g,__codexPercent).replace(/%[A-Za-z]/g,"").replace(new RegExp(__codexPercent,"g"),"%").trim(),__codexCommand=__codexDesktopTokens(__codexCleanExec);return __codexCommand.length?{name:__codexName||__codexPathModule.basename(__codexPath,".desktop"),command:__codexCommand,desktop_file:__codexPath}:null}catch{return null}};`,
     `try{let e=await __codexElectron.dialog.showOpenDialog({title:"Choose startup app",properties:["openFile"]});let t=Array.isArray(e.filePaths)?e.filePaths:[],n=t[0]||null,r=__codexDesktopEntry(n);return{ok:!e.canceled&&t.length>0,action:"pickStartupApp",json:{canceled:!!e.canceled,path:n,paths:t,startup_app:r,desktop:!!r}}}catch(e){return{ok:!1,action:"pickStartupApp",message:e instanceof Error?e.message:String(e)}}}`,
   ].join("");
 }
@@ -59,10 +61,31 @@ function useUserWritableNpmPrefixForInstallRuntime(source) {
 }
 
 function agentWorkspaceBridgeWithWorkspaceStartSource(args) {
-  return useUserWritableNpmPrefixForInstallRuntime(AGENT_WORKSPACE_BRIDGE_SOURCE_TEMPLATE)
-    .split("__CODEX_CHILD_PROCESS_VAR__").join(args.childProcessVar)
-    .split("__CODEX_FS_VAR__").join(args.fsVar)
-    .split("__CODEX_PATH_VAR__").join(args.pathVar);
+  let source = useUserWritableNpmPrefixForInstallRuntime(AGENT_WORKSPACE_BRIDGE_SOURCE_TEMPLATE)
+    .split("__CODEX_CHILD_PROCESS_VAR__").join("__codexChildProcessModule")
+    .split("__CODEX_FS_VAR__").join("__codexFsModule")
+    .split("__CODEX_PATH_VAR__").join("__codexPathModule");
+  const captures = [
+    [
+      `"linux-agent-workspace-pick-app":async()=>{`,
+      `let __codexFsModule=${args.fsVar},__codexPathModule=${args.pathVar};`,
+    ],
+    [
+      `"linux-agent-workspace-copy-browser-data":async({sourcePath:__codexSourcePath,profileId:__codexProfileId}={})=>{`,
+      `let __codexFsModule=${args.fsVar},__codexPathModule=${args.pathVar};`,
+    ],
+    [
+      `"linux-agent-workspace":async({action:__codexAction,timeoutMs:__codexTimeoutMs,profileId:__codexProfileId,profile:__codexProfile,replace:__codexReplace,dryRun:__codexDryRun,workspaceId:__codexWorkspaceId,purpose:__codexPurpose,runSetup:__codexRunSetup,ackHiddenWorkspace:__codexAckHiddenWorkspace,ackUnenforcedPolicy:__codexAckUnenforcedPolicy,startupWaitWindow:__codexStartupWaitWindow,startupScreenshotWindow:__codexStartupScreenshotWindow,cleanupId:__codexCleanupId,outputPath:__codexOutputPath,templateKind:__codexTemplateKind,hostPath:__codexHostPath,browserPath:__codexBrowserPath,userDataDir:__codexUserDataDir,alwaysOnTop:__codexAlwaysOnTop,permissions:__codexPermissions}={})=>{`,
+      `let __codexChildProcessModule=${args.childProcessVar},__codexFsModule=${args.fsVar},__codexPathModule=${args.pathVar};`,
+    ],
+  ];
+  for (const [marker, capture] of captures) {
+    if (!source.includes(marker)) {
+      throw new Error(`could not add agent workspace module capture for ${marker}`);
+    }
+    source = source.replace(marker, `${marker}${capture}`);
+  }
+  return source;
 }
 
 function agentWorkspaceActionBridgeSource(args) {
@@ -138,28 +161,13 @@ function replaceAgentWorkspaceActionBridge(currentSource, actionBridgeSource) {
 function applyAgentWorkspaceMainBridgePatch(currentSource) {
   const patchName = "agent workspace main bridge patch";
   if (currentSource.includes('"linux-agent-workspace":async')) {
-    const childProcessVar = requireName(currentSource, "node:child_process");
-    const fsVar = requireName(currentSource, "node:fs");
-    const pathVar = requireName(currentSource, "node:path");
-    if (childProcessVar == null || fsVar == null || pathVar == null) {
-      warn("Could not find Node module aliases for agent workspace bridge upgrade", patchName);
-      return currentSource;
-    }
-    const args = { childProcessVar, fsVar, pathVar };
+    const args = NODE_MODULE_EXPRESSIONS;
     let patchedSource = currentSource;
     patchedSource = ensureAgentWorkspaceBridgeEntry(patchedSource, agentWorkspaceAppPickerBridgeSource(args));
     patchedSource = ensureAgentWorkspaceBridgeEntry(patchedSource, agentWorkspaceMountPickerBridgeSource());
     patchedSource = ensureAgentWorkspaceBridgeEntry(patchedSource, agentWorkspaceBrowserDataPickerBridgeSource());
     patchedSource = ensureAgentWorkspaceBridgeEntry(patchedSource, agentWorkspaceBrowserDataCopyBridgeSource(args));
     return replaceAgentWorkspaceActionBridge(patchedSource, agentWorkspaceActionBridgeSource(args));
-  }
-
-  const childProcessVar = requireName(currentSource, "node:child_process");
-  const fsVar = requireName(currentSource, "node:fs");
-  const pathVar = requireName(currentSource, "node:path");
-  if (childProcessVar == null || fsVar == null || pathVar == null) {
-    warn("Could not find Node module aliases", patchName);
-    return currentSource;
   }
 
   const handlerNeedle = `"get-global-state":async({key:`;
@@ -170,28 +178,37 @@ function applyAgentWorkspaceMainBridgePatch(currentSource) {
 
   return currentSource.replace(
     handlerNeedle,
-    `${agentWorkspaceBridgeWithWorkspaceStartSource({ childProcessVar, fsVar, pathVar })},${handlerNeedle}`,
+    `${agentWorkspaceBridgeWithWorkspaceStartSource(NODE_MODULE_EXPRESSIONS)},${handlerNeedle}`,
   );
 }
 
 function buildAgentWorkspaceSettingsSource({
   chunkAsset,
+  chunkExportName = "s",
   reactAsset,
   reactExportName = "t",
-  settingsPageAsset,
-  settingsPageExportName = "t",
   codexRequestAsset,
   codexRequestExportName = "n",
   vscodeApiAsset,
 }) {
   const requestAsset = codexRequestAsset ?? vscodeApiAsset;
-  return `import{s as __toESM}from"./${chunkAsset}";
+  return `import{${chunkExportName} as __toESM}from"./${chunkAsset}";
 import{${reactExportName} as __reactFactory}from"./${reactAsset}";
 import{${codexRequestExportName} as __post}from"./${requestAsset}";
-import{${settingsPageExportName} as SettingsPage}from"./${settingsPageAsset}";
 
 var React=__toESM(__reactFactory(),1);
 var h=React.createElement;
+function SettingsPage({title,subtitle,children}){
+  return h("div",{className:"h-full min-h-0 w-full overflow-y-auto"},
+    h("div",{className:"mx-auto flex w-full max-w-5xl flex-col gap-6 px-4 py-6"},
+      h("div",{className:"flex flex-col gap-1"},
+        h("h2",{className:"text-xl font-semibold text-token-text-primary"},title),
+        subtitle?h("p",{className:"text-sm text-token-text-secondary"},subtitle):null
+      ),
+      children
+    )
+  );
+}
 var COMMAND_KEY=${JSON.stringify(SETTINGS_COMMAND_KEY)};
 var PERMISSIONS_KEY=${JSON.stringify(SETTINGS_PERMISSIONS_KEY)};
 var DEFAULT_COMMAND_LABEL="Auto-discovered agent-workspace-linux";
@@ -1771,90 +1788,193 @@ function webviewAssetsDir(extractedDir) {
   return path.join(extractedDir, "webview", "assets");
 }
 
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function importBindings(source) {
+  const bindings = new Map();
+  const importPattern = /import\{([^}]+)\}from"\.\/([^"]+)"/g;
+  let match;
+  while ((match = importPattern.exec(source)) != null) {
+    const [, specifiers, assetName] = match;
+    for (const rawSpecifier of specifiers.split(",")) {
+      const specifier = rawSpecifier.trim();
+      if (specifier.length === 0) {
+        continue;
+      }
+      const aliased = specifier.match(/^([A-Za-z_$][\w$]*)\s+as\s+([A-Za-z_$][\w$]*)$/);
+      if (aliased != null) {
+        bindings.set(aliased[2], { assetName, exportName: aliased[1] });
+      } else {
+        bindings.set(specifier, { assetName, exportName: specifier });
+      }
+    }
+  }
+  return bindings;
+}
+
+function inferRuntimeDependenciesFromSettingsSource(source) {
+  const jsxLocal = source.match(/\(0,([A-Za-z_$][\w$]*)\.jsx\)/)?.[1] ?? null;
+  const reactLocal = source.match(/\(0,([A-Za-z_$][\w$]*)\.useState\)/)?.[1] ?? null;
+  if (jsxLocal == null || reactLocal == null) {
+    return null;
+  }
+
+  const jsxFactoryLocal = source.match(
+    new RegExp(`${escapeRegExp(jsxLocal)}=([A-Za-z_$][\\w$]*)\\(\\)`),
+  )?.[1] ?? null;
+  const reactInitialization = source.match(
+    new RegExp(`${escapeRegExp(reactLocal)}=([A-Za-z_$][\\w$]*)\\(([A-Za-z_$][\\w$]*)\\(\\),1\\)`),
+  );
+  const chunkHelperLocal = reactInitialization?.[1] ?? null;
+  const reactFactoryLocal = reactInitialization?.[2] ?? null;
+  if (jsxFactoryLocal == null || chunkHelperLocal == null || reactFactoryLocal == null) {
+    return null;
+  }
+
+  const bindings = importBindings(source);
+  const chunkBinding = bindings.get(chunkHelperLocal);
+  const reactBinding = bindings.get(reactFactoryLocal);
+  if (bindings.get(jsxFactoryLocal) == null || chunkBinding == null || reactBinding == null) {
+    return null;
+  }
+
+  return {
+    chunkAsset: chunkBinding.assetName,
+    chunkExportName: chunkBinding.exportName,
+    reactAsset: reactBinding.assetName,
+    reactExportName: reactBinding.exportName,
+  };
+}
+
+function inferRuntimeDependenciesFromSettingsAssets(assetsDir) {
+  const candidates = fs
+    .readdirSync(assetsDir)
+    .filter((name) => /^settings-page-[^.]+\.js$/.test(name))
+    .sort();
+  for (const candidate of candidates) {
+    const dependencies = inferRuntimeDependenciesFromSettingsSource(
+      fs.readFileSync(path.join(assetsDir, candidate), "utf8"),
+    );
+    if (dependencies != null) {
+      return dependencies;
+    }
+  }
+  return null;
+}
+
 function resolveAgentWorkspaceSettingsAsset(extractedDir) {
   const assetsDir = webviewAssetsDir(extractedDir);
   if (!fs.existsSync(assetsDir)) {
     throw new Error(`missing webview assets directory ${assetsDir}`);
   }
 
-  const jsxRuntimeAsset = findRequiredWebviewAsset(
-    assetsDir,
-    /^jsx-runtime-.*\.js$/,
-    "react.transitional.element",
-    "JSX runtime asset",
-  );
-  const jsxRuntimeSource = fs.readFileSync(path.join(assetsDir, jsxRuntimeAsset), "utf8");
-  const jsxExportsReactFactory = /export\{[^}]*\bn\b/.test(jsxRuntimeSource);
-  const reactAsset = jsxExportsReactFactory
-    ? jsxRuntimeAsset
-    : findRequiredWebviewAsset(assetsDir, /^react-.*\.js$/, "react.transitional.element", "React asset");
-  const reactExportName = jsxExportsReactFactory ? "n" : "t";
-  const chunkAsset = findImportedAsset(assetsDir, reactAsset, "React shared chunk asset");
+  const runtimeDependencies = inferRuntimeDependenciesFromSettingsAssets(assetsDir);
+  if (runtimeDependencies == null) {
+    throw new Error("could not resolve current settings runtime dependencies");
+  }
+  const {
+    chunkAsset,
+    chunkExportName,
+    reactAsset,
+    reactExportName,
+  } = runtimeDependencies;
   const codexRequestAsset = findCodexRequestWebviewAsset(assetsDir);
-  const settingsPageAsset = findRequiredWebviewAsset(
-    assetsDir,
-    /^settings-content-layout-.*\.js$/,
-    null,
-    "settings content layout asset",
-  );
 
   return {
     filePath: path.join(assetsDir, SETTINGS_ASSET),
     source: buildAgentWorkspaceSettingsSource({
       chunkAsset,
+      chunkExportName,
       reactAsset,
       reactExportName,
-      settingsPageAsset,
-      settingsPageExportName: "t",
       codexRequestAsset: codexRequestAsset.assetName,
       codexRequestExportName: codexRequestAsset.exportName,
     }),
   };
 }
 
-function patchRequiredAssets(extractedDir, filenamePattern, patchFn, description) {
-  const assetsDir = webviewAssetsDir(extractedDir);
-  const candidates = fs
-    .readdirSync(assetsDir)
-    .filter((name) => filenamePattern.test(name))
-    .sort();
-  if (candidates.length === 0) {
-    throw new Error(`could not find ${description}`);
-  }
-
-  return candidates.map((candidate) => {
-    const filePath = path.join(assetsDir, candidate);
-    const currentSource = fs.readFileSync(filePath, "utf8");
-    return {
-      filePath,
-      currentSource,
-      patchedSource: patchFn(currentSource),
-    };
-  });
+function isAgentWorkspaceSettingsSharedMetadataBundleSource(currentSource) {
+  return (
+    currentSource.includes('"local-environments":{id:`settings.nav.local-environments`') &&
+    currentSource.includes("settings.section.worktrees")
+  );
 }
 
-function applyAgentWorkspaceSettingsSectionsPatch(currentSource) {
-  if (currentSource.includes(`slug:\`${SETTINGS_SLUG}\``)) {
+const CURRENT_SETTINGS_ROUTE_PATTERN =
+  /"general-settings":(?=([A-Za-z_$][\w$]*)\(async\(\)=>\(await ([A-Za-z_$][\w$]*)\(async\(\)=>\{let\{GeneralSettings:[A-Za-z_$][\w$]*\}=await import\()/;
+
+function isAgentWorkspaceSettingsRouteBundleSource(currentSource) {
+  return (
+    currentSource.includes(SETTINGS_ASSET) ||
+    CURRENT_SETTINGS_ROUTE_PATTERN.test(currentSource)
+  );
+}
+
+const CURRENT_SETTINGS_CATALOG_SLUGS = "local-environments.worktrees.environments";
+const PATCHED_SETTINGS_CATALOG_SLUGS = "local-environments.agent-workspaces.worktrees.environments";
+const CURRENT_SETTINGS_CATALOG_ITEMS = "{slug:`local-environments`},{slug:`worktrees`}";
+const PATCHED_SETTINGS_CATALOG_ITEMS = "{slug:`local-environments`},{slug:`agent-workspaces`},{slug:`worktrees`}";
+const CURRENT_SETTINGS_NAVIGATION_SLUGS = "local-environments.worktrees.browser-use";
+const PATCHED_SETTINGS_NAVIGATION_SLUGS = "local-environments.agent-workspaces.worktrees.browser-use";
+const CURRENT_SETTINGS_NAVIGATION_GROUP = "`local-environments`,`environments`,`worktrees`";
+const PATCHED_SETTINGS_NAVIGATION_GROUP =
+  "`local-environments`,`agent-workspaces`,`environments`,`worktrees`";
+const CURRENT_SETTINGS_VISIBILITY_CASES =
+  "case`worktrees`:case`local-environments`:case`environments`:return";
+const PATCHED_SETTINGS_VISIBILITY_CASES =
+  "case`worktrees`:case`local-environments`:case`agent-workspaces`:case`environments`:return";
+const CURRENT_SETTINGS_ICON_PATTERN =
+  /"local-environments":([A-Za-z_$][\w$]*),worktrees:([A-Za-z_$][\w$]*)/;
+const PATCHED_SETTINGS_ICON_PATTERN =
+  /"local-environments":([A-Za-z_$][\w$]*),"agent-workspaces":([A-Za-z_$][\w$]*),worktrees:([A-Za-z_$][\w$]*)/;
+
+function isAgentWorkspaceSettingsNavigationBundleSource(currentSource) {
+  return (
+    (currentSource.includes(CURRENT_SETTINGS_NAVIGATION_SLUGS) ||
+      currentSource.includes(PATCHED_SETTINGS_NAVIGATION_SLUGS)) &&
+    (currentSource.includes(CURRENT_SETTINGS_NAVIGATION_GROUP) ||
+      currentSource.includes(PATCHED_SETTINGS_NAVIGATION_GROUP))
+  );
+}
+
+function isAgentWorkspaceSettingsVisibilityBundleSource(currentSource) {
+  return (
+    (CURRENT_SETTINGS_ICON_PATTERN.test(currentSource) ||
+      PATCHED_SETTINGS_ICON_PATTERN.test(currentSource)) &&
+    (currentSource.includes(CURRENT_SETTINGS_VISIBILITY_CASES) ||
+      currentSource.includes(PATCHED_SETTINGS_VISIBILITY_CASES))
+  );
+}
+
+function isAgentWorkspaceSettingsCatalogBundleSource(currentSource) {
+  return (
+    (currentSource.includes(CURRENT_SETTINGS_CATALOG_SLUGS) ||
+      currentSource.includes(PATCHED_SETTINGS_CATALOG_SLUGS)) &&
+    (currentSource.includes(CURRENT_SETTINGS_CATALOG_ITEMS) ||
+      currentSource.includes(PATCHED_SETTINGS_CATALOG_ITEMS))
+  );
+}
+
+function applyAgentWorkspaceSettingsCatalogPatch(currentSource) {
+  const slugsPatched = currentSource.includes(PATCHED_SETTINGS_CATALOG_SLUGS);
+  const itemsPatched = currentSource.includes(PATCHED_SETTINGS_CATALOG_ITEMS);
+  if (slugsPatched && itemsPatched) {
     return currentSource;
   }
-
-  const preferredNeedle = "{slug:`local-environments`},{slug:`worktrees`}";
-  if (currentSource.includes(preferredNeedle)) {
-    return currentSource.replace(
-      preferredNeedle,
-      `{slug:\`local-environments\`},{slug:\`${SETTINGS_SLUG}\`},{slug:\`worktrees\`}`,
-    );
+  if (slugsPatched !== itemsPatched) {
+    throw new Error("agent workspace settings catalog is partially patched");
   }
-
-  const fallbackNeedle = "n=[{slug:`general-settings`},";
-  if (currentSource.includes(fallbackNeedle)) {
-    return currentSource.replace(
-      fallbackNeedle,
-      `n=[{slug:\`general-settings\`},{slug:\`${SETTINGS_SLUG}\`},`,
-    );
+  if (
+    currentSource.split(CURRENT_SETTINGS_CATALOG_SLUGS).length !== 2 ||
+    currentSource.split(CURRENT_SETTINGS_CATALOG_ITEMS).length !== 2
+  ) {
+    throw new Error("could not add agent workspace to current settings catalog");
   }
-
-  throw new Error("could not add agent workspace settings section");
+  return currentSource
+    .replace(CURRENT_SETTINGS_CATALOG_SLUGS, PATCHED_SETTINGS_CATALOG_SLUGS)
+    .replace(CURRENT_SETTINGS_CATALOG_ITEMS, PATCHED_SETTINGS_CATALOG_ITEMS);
 }
 
 function applyAgentWorkspaceSettingsSharedPatch(currentSource) {
@@ -1877,10 +1997,12 @@ function applyAgentWorkspaceSettingsSharedPatch(currentSource) {
       throw new Error("could not add agent workspace section title");
     }
     const sectionRendererMatch = patchedSource.match(
-      /case`worktrees`:\{[\s\S]*?\(0,([A-Za-z_$][\w$]*)\.jsx\)\(([A-Za-z_$][\w$]*),\{id:`settings\.section\.worktrees`/,
+      /case`local-environments`:\{[\s\S]*?\(0,([A-Za-z_$][\w$]*)\.jsx\)\(([A-Za-z_$][\w$]*),\{id:`settings\.section\.local-environments`/,
     );
-    const jsxAlias = sectionRendererMatch?.[1] ?? "d";
-    const messageComponent = sectionRendererMatch?.[2] ?? "n";
+    if (sectionRendererMatch == null) {
+      throw new Error("could not resolve current settings section renderer aliases");
+    }
+    const [, jsxAlias, messageComponent] = sectionRendererMatch;
     patchedSource = patchedSource.replace(
       sectionNeedle,
       `case\`${SETTINGS_SLUG}\`:{return (0,${jsxAlias}.jsx)(${messageComponent},{id:\`settings.section.${SETTINGS_SLUG}\`,defaultMessage:\`Agent Workspaces\`,description:\`Title for Agent Workspaces settings section\`})}${sectionNeedle}`,
@@ -1893,165 +2015,130 @@ function applyAgentWorkspaceSettingsIndexPatch(currentSource) {
   let patchedSource = currentSource;
 
   if (!patchedSource.includes(SETTINGS_ASSET)) {
-    const routePattern = /"general-settings":(?=\(0,([A-Za-z_$][\w$]*)\.lazy\)\(\(\)=>([A-Za-z_$][\w$]*)\()/;
-    if (!routePattern.test(patchedSource)) {
+    if (!CURRENT_SETTINGS_ROUTE_PATTERN.test(patchedSource)) {
       throw new Error("could not add agent workspace settings route");
     }
     patchedSource = patchedSource.replace(
-      routePattern,
+      CURRENT_SETTINGS_ROUTE_PATTERN,
       (_match, lazyAlias, preloadAlias) =>
-        `"${SETTINGS_SLUG}":(0,${lazyAlias}.lazy)(()=>${preloadAlias}(()=>import(\`./${SETTINGS_ASSET}\`),[],import.meta.url)),"general-settings":`,
+        `"${SETTINGS_SLUG}":${lazyAlias}(async()=>(await ${preloadAlias}(async()=>{let{default:e}=await import(\`./${SETTINGS_ASSET}\`);return{default:e}},[],import.meta.url)).default),"general-settings":`,
     );
-  }
-
-  const iconPattern = /([,{])"general-settings":([A-Za-z_$][\w$]*),/;
-  if (
-    !new RegExp(`[,{]"${SETTINGS_SLUG}":[A-Za-z_$][\\w$]*,"general-settings":`).test(patchedSource) &&
-    iconPattern.test(patchedSource)
-  ) {
-    patchedSource = patchedSource.replace(
-      iconPattern,
-      (_match, prefix, icon) => `${prefix}"${SETTINGS_SLUG}":${icon},"general-settings":${icon},`,
-    );
-  }
-
-  const hasLegacyVisibilityGate =
-    patchedSource.includes("case`appearance`:case`git-settings`:case`worktrees`:case`local-environments`:") ||
-    patchedSource.includes("case`local-environments`:case`worktrees`:case`environments`:");
-  patchedSource = patchedSource.replaceAll(
-    "`local-environments`,`worktrees`",
-    "`local-environments`,`agent-workspaces`,`worktrees`",
-  );
-  if (!patchedSource.includes("case`local-environments`:case`agent-workspaces`:case`data-controls`:case`environments`:return")) {
-    patchedSource = patchedSource.replace(
-      "case`appearance`:case`git-settings`:case`worktrees`:case`local-environments`:",
-      "case`appearance`:case`git-settings`:case`worktrees`:case`local-environments`:case`agent-workspaces`:",
-    );
-  }
-  if (!patchedSource.includes("case`local-environments`:case`agent-workspaces`:case`worktrees`:case`environments`:")) {
-    patchedSource = patchedSource.replace(
-      "case`local-environments`:case`worktrees`:case`environments`:",
-      "case`local-environments`:case`agent-workspaces`:case`worktrees`:case`environments`:",
-    );
-  }
-
-  if (hasLegacyVisibilityGate && !patchedSource.includes(`case\`${SETTINGS_SLUG}\``)) {
-    throw new Error("could not add agent workspace settings visibility");
   }
 
   return patchedSource;
 }
 
-function inferSettingsPageJsxAlias(source) {
-  return source.match(/\(0,([A-Za-z_$][\w$]*)\.jsxs\)\(\`svg\`,/)?.[1] ?? "Z";
-}
-
-function agentWorkspaceSettingsNavIconSource(jsxAlias = "Z") {
-  return `codexLinuxAgentWorkspaceSettingsIcon=e=>(0,${jsxAlias}.jsxs)(\`svg\`,{width:16,height:16,viewBox:\`0 0 16 16\`,fill:\`none\`,xmlns:\`http://www.w3.org/2000/svg\`,...e,children:[(0,${jsxAlias}.jsx)(\`rect\`,{x:2.25,y:2.25,width:11.5,height:11.5,rx:2.1,stroke:\`currentColor\`,strokeWidth:1.2,strokeDasharray:\`1.8 1.4\`}),(0,${jsxAlias}.jsx)(\`path\`,{d:\`M6.15 5.55 7.4 9.55M9.85 5.55 8.6 9.55M6.4 5h3.2\`,stroke:\`currentColor\`,strokeWidth:1.1,strokeLinecap:\`round\`,strokeLinejoin:\`round\`}),(0,${jsxAlias}.jsx)(\`circle\`,{cx:5.1,cy:5, r:1.15,stroke:\`currentColor\`,strokeWidth:1.1}),(0,${jsxAlias}.jsx)(\`circle\`,{cx:10.9,cy:5,r:1.15,stroke:\`currentColor\`,strokeWidth:1.1}),(0,${jsxAlias}.jsx)(\`circle\`,{cx:8,cy:11,r:1.15,stroke:\`currentColor\`,strokeWidth:1.1})]})`;
-}
-
-function applyAgentWorkspaceSettingsIconPatch(currentSource) {
-  if (currentSource.includes("codexLinuxAgentWorkspaceSettingsIcon=e=>")) {
-    return currentSource;
-  }
-
-  const iconMapMatch = currentSource.match(
-    /(?:var |let |const |,)[A-Za-z_$][\w$]*=\{[^;\n]*"local-environments":[^;\n]*worktrees:/,
-  );
-  if (iconMapMatch == null) {
-    return currentSource;
-  }
-
-  const iconSource = agentWorkspaceSettingsNavIconSource(inferSettingsPageJsxAlias(currentSource));
-  const index = iconMapMatch.index ?? 0;
-  if (iconMapMatch[0].startsWith(",")) {
-    return `${currentSource.slice(0, index)},${iconSource}${currentSource.slice(index)}`;
-  }
-
-  const keyword = iconMapMatch[0].match(/^(var |let |const )/)?.[1] ?? "var ";
-  return `${currentSource.slice(0, index)}${keyword}${iconSource};${currentSource.slice(index)}`;
-}
-
 function applyAgentWorkspaceSettingsPagePatch(currentSource) {
   let patchedSource = currentSource;
+  let matched = false;
 
-  patchedSource = applyAgentWorkspaceSettingsIconPatch(patchedSource);
-  const agentWorkspaceIcon = patchedSource.includes("codexLinuxAgentWorkspaceSettingsIcon=e=>")
-    ? "codexLinuxAgentWorkspaceSettingsIcon"
-    : patchedSource.match(/"local-environments":([A-Za-z_$][\w$]*)/)?.[1] ?? null;
-
-  if (agentWorkspaceIcon != null) {
-    patchedSource = patchedSource.replace(
-      new RegExp(`"${SETTINGS_SLUG}":[A-Za-z_$][\\w$]*`),
-      `"${SETTINGS_SLUG}":${agentWorkspaceIcon}`,
-    );
+  if (isAgentWorkspaceSettingsNavigationBundleSource(patchedSource)) {
+    matched = true;
+    const slugsPatched = patchedSource.includes(PATCHED_SETTINGS_NAVIGATION_SLUGS);
+    const groupPatched = patchedSource.includes(PATCHED_SETTINGS_NAVIGATION_GROUP);
+    if (slugsPatched !== groupPatched) {
+      throw new Error("agent workspace settings navigation is partially patched");
+    }
+    if (!slugsPatched) {
+      patchedSource = patchedSource
+        .replace(CURRENT_SETTINGS_NAVIGATION_SLUGS, PATCHED_SETTINGS_NAVIGATION_SLUGS)
+        .replace(CURRENT_SETTINGS_NAVIGATION_GROUP, PATCHED_SETTINGS_NAVIGATION_GROUP);
+    }
   }
 
-  if (
-    !new RegExp(`[,{]"${SETTINGS_SLUG}":[A-Za-z_$][\\w$]*,worktrees`).test(patchedSource) &&
-    /"local-environments":([A-Za-z_$][\w$]*),worktrees:/.test(patchedSource)
-  ) {
-    patchedSource = patchedSource.replace(
-      /"local-environments":([A-Za-z_$][\w$]*),worktrees:/,
-      `"local-environments":$1,"${SETTINGS_SLUG}":${agentWorkspaceIcon ?? "$1"},worktrees:`,
-    );
+  if (isAgentWorkspaceSettingsVisibilityBundleSource(patchedSource)) {
+    matched = true;
+    const iconMatch = patchedSource.match(PATCHED_SETTINGS_ICON_PATTERN);
+    if (iconMatch != null && iconMatch[1] !== iconMatch[2]) {
+      throw new Error("agent workspace settings visibility has an unexpected icon");
+    }
+    const iconPatched = iconMatch != null && iconMatch[1] === iconMatch[2];
+    const casesPatched = patchedSource.includes(PATCHED_SETTINGS_VISIBILITY_CASES);
+    if (iconPatched !== casesPatched) {
+      throw new Error("agent workspace settings visibility is partially patched");
+    }
+    if (!iconPatched) {
+      patchedSource = patchedSource
+        .replace(
+          CURRENT_SETTINGS_ICON_PATTERN,
+          (_match, localEnvironmentsIcon, worktreesIcon) =>
+            `"local-environments":${localEnvironmentsIcon},"${SETTINGS_SLUG}":${localEnvironmentsIcon},worktrees:${worktreesIcon}`,
+        )
+        .replace(CURRENT_SETTINGS_VISIBILITY_CASES, PATCHED_SETTINGS_VISIBILITY_CASES);
+    }
   }
 
-  patchedSource = patchedSource.replaceAll(
-    "`local-environments`,`worktrees`",
-    "`local-environments`,`agent-workspaces`,`worktrees`",
-  );
-
-  if (!patchedSource.includes("case`local-environments`:case`agent-workspaces`:case`environments`:return")) {
-    patchedSource = patchedSource.replace(
-      "case`appearance`:case`git-settings`:case`worktrees`:case`local-environments`:case`environments`:return",
-      "case`appearance`:case`git-settings`:case`worktrees`:case`local-environments`:case`agent-workspaces`:case`environments`:return",
-    );
-  }
-
-  if (!patchedSource.includes("case`local-environments`:case`agent-workspaces`:case`worktrees`:case`environments`:")) {
-    patchedSource = patchedSource.replace(
-      "case`local-environments`:case`worktrees`:case`environments`:",
-      "case`local-environments`:case`agent-workspaces`:case`worktrees`:case`environments`:",
-    );
-  }
-
-  if (!patchedSource.includes(`\`${SETTINGS_SLUG}\``)) {
+  if (!matched) {
     throw new Error("could not add agent workspace settings navigation");
   }
 
   return patchedSource;
 }
 
-function patchAgentWorkspaceRouteAssets(extractedDir) {
+function collectAgentWorkspaceRouteAndNavigationPatches(extractedDir) {
   const assetsDir = webviewAssetsDir(extractedDir);
+  if (!fs.existsSync(assetsDir)) {
+    throw new Error(`missing webview assets directory ${assetsDir}`);
+  }
+
   const candidates = fs
     .readdirSync(assetsDir)
-    .filter((name) => /^(app-main|index)-.*\.js$/.test(name))
+    .filter((name) =>
+      /^app-initial-[^.]+\.js$/.test(name) ||
+      /^settings-page-[^.]+\.js$/.test(name) ||
+      /^use-visible-settings-sections-[^.]+\.js$/.test(name)
+    )
     .sort();
-  let lastError = null;
+  let metadataMatched = false;
+  let routeMatched = false;
+  let navigationMatched = false;
+  let visibilityMatched = false;
+  let catalogMatched = false;
   const patches = [];
 
   for (const candidate of candidates) {
     const filePath = path.join(assetsDir, candidate);
     const currentSource = fs.readFileSync(filePath, "utf8");
-    if (!currentSource.includes(SETTINGS_ASSET) && !currentSource.includes('"general-settings":(0,')) {
-      continue;
+    let patchedSource = currentSource;
+    if (isAgentWorkspaceSettingsSharedMetadataBundleSource(currentSource)) {
+      metadataMatched = true;
+      patchedSource = applyAgentWorkspaceSettingsSharedPatch(patchedSource);
     }
-
-    try {
-      patches.push({
-        filePath,
-        currentSource,
-        patchedSource: applyAgentWorkspaceSettingsIndexPatch(currentSource),
-      });
-    } catch (error) {
-      lastError = error;
+    if (isAgentWorkspaceSettingsRouteBundleSource(currentSource)) {
+      routeMatched = true;
+      patchedSource = applyAgentWorkspaceSettingsIndexPatch(patchedSource);
+    }
+    if (isAgentWorkspaceSettingsNavigationBundleSource(currentSource)) {
+      navigationMatched = true;
+      patchedSource = applyAgentWorkspaceSettingsPagePatch(patchedSource);
+    }
+    if (isAgentWorkspaceSettingsVisibilityBundleSource(currentSource)) {
+      visibilityMatched = true;
+      patchedSource = applyAgentWorkspaceSettingsPagePatch(patchedSource);
+    }
+    if (isAgentWorkspaceSettingsCatalogBundleSource(currentSource)) {
+      catalogMatched = true;
+      patchedSource = applyAgentWorkspaceSettingsCatalogPatch(patchedSource);
+    }
+    if (patchedSource !== currentSource) {
+      patches.push({ filePath, currentSource, patchedSource });
     }
   }
 
-  if (patches.length === 0) {
-    throw lastError ?? new Error("could not find webview settings route bundle");
+  if (!metadataMatched) {
+    throw new Error("could not find webview settings metadata bundle");
+  }
+  if (!routeMatched) {
+    throw new Error("could not find webview settings route bundle");
+  }
+  if (!navigationMatched) {
+    throw new Error("could not find webview settings navigation bundle");
+  }
+  if (!visibilityMatched) {
+    throw new Error("could not find webview settings visibility bundle");
+  }
+  if (!catalogMatched) {
+    throw new Error("could not find current webview settings catalog bundle");
   }
 
   return patches;
@@ -2063,27 +2150,7 @@ function patchAgentWorkspaceSettingsAssets(extractedDir) {
     const previousSettingsSource = fs.existsSync(settingsAsset.filePath)
       ? fs.readFileSync(settingsAsset.filePath, "utf8")
       : null;
-    const patches = [
-      ...patchRequiredAssets(
-        extractedDir,
-        /^settings-sections-.*\.js$/,
-        applyAgentWorkspaceSettingsSectionsPatch,
-        "settings sections bundle",
-      ),
-      ...patchRequiredAssets(
-        extractedDir,
-        /^settings-shared-.*\.js$/,
-        applyAgentWorkspaceSettingsSharedPatch,
-        "settings shared bundle",
-      ),
-      ...patchRequiredAssets(
-        extractedDir,
-        /^settings-page-.*\.js$/,
-        applyAgentWorkspaceSettingsPagePatch,
-        "settings page bundle",
-      ),
-      ...patchAgentWorkspaceRouteAssets(extractedDir),
-    ];
+    const patches = collectAgentWorkspaceRouteAndNavigationPatches(extractedDir);
 
     fs.writeFileSync(settingsAsset.filePath, settingsAsset.source, "utf8");
     let changed = previousSettingsSource !== settingsAsset.source ? 1 : 0;
@@ -2102,7 +2169,7 @@ function patchAgentWorkspaceSettingsAssets(extractedDir) {
 }
 
 module.exports = {
-  patches: [
+  descriptors: [
     {
       id: "main-bridge",
       phase: "main-bundle",
@@ -2112,7 +2179,7 @@ module.exports = {
     },
     {
       id: "settings-page",
-      phase: "extracted-app",
+      phase: "extracted-app:post-webview",
       order: 20_810,
       ciPolicy: "optional",
       apply: (extractedDir) => patchAgentWorkspaceSettingsAssets(extractedDir),
@@ -2133,8 +2200,8 @@ module.exports = {
   SETTINGS_SLUG,
   applyAgentWorkspaceMainBridgePatch,
   applyAgentWorkspaceSettingsIndexPatch,
+  applyAgentWorkspaceSettingsCatalogPatch,
   applyAgentWorkspaceSettingsPagePatch,
-  applyAgentWorkspaceSettingsSectionsPatch,
   applyAgentWorkspaceSettingsSharedPatch,
   buildAgentWorkspaceSettingsSource,
   patchAgentWorkspaceSettingsAssets,

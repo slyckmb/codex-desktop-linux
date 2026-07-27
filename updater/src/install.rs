@@ -175,11 +175,6 @@ pub fn installed_package_version() -> String {
     }
 }
 
-/// Returns whether the primary native package still appears to be installed.
-pub fn is_primary_package_installed() -> bool {
-    installed_package_version() != "unknown"
-}
-
 fn installed_deb_version() -> String {
     installed_version_from_command(
         &program_path(DPKG_QUERY_CANDIDATES, "dpkg-query"),
@@ -260,7 +255,13 @@ pub fn pkexec_command(current_exe: &Path, package_path: &Path) -> Command {
         PackageKind::Deb => "install-deb",
         PackageKind::Pacman => "install-pacman",
     };
-    let mut command = Command::new("pkexec");
+    #[cfg(test)]
+    let pkexec_program = std::env::var_os("CODEX_UPDATE_MANAGER_TEST_PKEXEC_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("pkexec"));
+    #[cfg(not(test))]
+    let pkexec_program = PathBuf::from("pkexec");
+    let mut command = Command::new(pkexec_program);
     command
         .arg("--disable-internal-agent")
         .arg(updater_binary)

@@ -1,10 +1,9 @@
 {
   "id": "remote-control-ui",
   "title": "Remote Control UI",
-  "description": "Adds opt-in Linux visibility patches for remote control, Codex mobile onboarding, and related settings surfaces.",
+  "description": "Adds opt-in Linux visibility patches for remote control and related settings surfaces.",
   "defaultEnabled": false,
   "entrypoints": {
-    "patches": "./patch.js"
+    "patchDescriptors": "./patch.js"
   }
 }
-

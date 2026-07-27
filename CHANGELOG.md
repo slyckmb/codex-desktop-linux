@@ -7,6 +7,255 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- The launcher sends at most one anonymous `/app-launch` count per UTC day to
+  the public GoatCounter dashboard so maintainers can gauge whether the
+  distribution is useful. The background request uses one fixed,
+  non-identifying User-Agent and contains no application, account, machine,
+  version, architecture, language, screen, or referrer data;
+  `CODEX_LINUX_DISABLE_USAGE_REPORTING=1` disables it.
+- A disabled-by-default `deferred-update-build` Linux feature adds a **Build
+  updates automatically** setting. Turning it off keeps notification and DMG
+  verification active while deferring local package builds until an explicit
+  **Check for updates**.
+- The embedded Computer Use backend is synchronized to standalone v0.4.9 as
+  `0.4.9-linux-alpha1`, including generic X11/EWMH window control, deep GTK4
+  accessibility traversal, bounded queue and child-read work, X11 `xdotool`
+  keyboard, text, and coordinate-click input, KDE portal scroll polarity, and
+  portal key chords, with generic X11 registered last.
+- A shared upstream DMG acceptance profile now produces the same structured
+  decision for local installs, updater rebuilds, and scheduled CI. Scheduled
+  rejections create one fingerprinted drift issue and supersede issues for
+  older DMGs. Acceptance evaluates only the user's enabled Linux features and
+  preserves the working app if any enabled feature drifts.
+- Nix module configurations can select the opt-in `mcp-helper-reaper`
+  feature. Its Rust helper is supplied by a reproducible Nix derivation and is
+  not added to the default package closure.
+- An opt-in `global-dictation` Linux feature enables the desktop app's global
+  hold and toggle dictation shortcuts on X11 and Wayland. X11 uses Electron
+  registration with a bounded modifier release watcher, while Wayland uses the
+  XDG GlobalShortcuts and RemoteDesktop portals for press, release, and paste
+  handling without direct input-device access or elevated permissions.
+
+### Changed
+
+- Remote mobile control now relies on the current upstream account-enrollment
+  compatibility and Connections tab resolver instead of patching duplicate
+  Linux-specific fallbacks into those paths.
+- Remote notification hydration, replay, completed-item recovery, and remote
+  terminal-status recovery are no longer part of the default Linux patch set and
+  remain owned by the disabled-by-default `remote-mobile-control` feature.
+- The `remote-mobile-control` feature no longer duplicates the generic Linux
+  `remote_control` config preservation patch already owned by the core patch
+  set.
+
+### Fixed
+
+- The opt-in `frameless-titlebar` feature again hides official Linux overlay
+  buttons. It retargets the current `titleBarOverlay` window options, zoom
+  update, and theme-sync contracts, remaps Linux webview chrome to `native`,
+  and rejects mixed, duplicate, or drifted official-package surfaces
+  byte-identically. Retired DMG inset and user-agent layout-gate rewrites are
+  omitted because official Linux already uses a 0px inset for both layouts.
+- The opt-in Dock icon tweak is restored for the signed official Linux package,
+  using its ChatGPT icon and desktop metadata while preserving ChatGPT
+  Community window, tray, and managed launcher synchronization.
+- Native remote-mobile builds now route side-by-side `--new-instance` launches
+  through the normal single-instance handoff, preventing competing Desktop
+  Remote Control owners. Nix module sessions instead proxy every Desktop
+  app-server RPC to the single declarative systemd owner, so enablement,
+  pairing, and status calls reach the process listening on the Unix control
+  socket without restricting non-owner Desktop instances.
+- Deferred upstream DMGs are revalidated before a build. A newer candidate
+  supersedes the pending download, and a deleted cached DMG is redownloaded in
+  the same explicit check. Fresh app-launch checks preserve the stable deferred
+  candidate without an upstream DMG request; stale checks use HEAD and reuse a valid
+  unchanged cached DMG, while offline checks leave it pending. The optional
+  state marker retains the existing `update_detected` status so updater 0.10.x
+  can read the state and resume its previous automatic-build behavior. State
+  written by prerelease builds using `update_available` is migrated back to
+  `update_detected` on read.
+- Computer Use diagnostics now distinguish pointer-only direct uinput and
+  RemoteDesktop support from keyboard-ready input. Portal capabilities require
+  the methods and device/source types used by the runtime, plus the hidden
+  cursor mode on ScreenCast v2 and newer, so incomplete portal implementations
+  no longer produce a false-ready result without rejecting compatible v1 portals.
+- Native X11 coordinate clicks now use one supervised xdotool XTEST command,
+  fall back to ydotool only when xdotool cannot launch, and preserve nested X11
+  session identity instead of importing a host Wayland display.
+- Wrapper update checks no longer offer rebuilds when every change since the
+  installed commit is limited to repository documentation or metadata.
+- The updater feature picker now changes only the enabled feature list, preserving
+  nested feature settings and other local configuration keys across rebuilds.
+- The opt-in directory-only working-tree watcher now uses Watchbound for
+  bounded recursive Linux watch coverage while retaining its existing Git-ignore,
+  logical-path, root-recovery, and focus-recovery policies.
+- The opt-in Dock icon tweak now targets the current upstream main-process
+  bundle, restoring Linux window, tray, and desktop icon synchronization.
+- The opt-in shallow repository watcher now patches both current app bundles
+  and routes the Linux Parcel working-tree path through the same shallow host,
+  restoring bounded watches on the latest upstream DMG.
+- The opt-in directory-only working-tree watcher now routes the current Linux
+  Parcel working-tree path through its existing bounded directory watcher,
+  restoring the feature on the latest upstream DMG, with byte-verified rollback
+  for its paired bundle writes.
+- Computer Use now supports Plasma 5 and 6 KWin scripting, validates every
+  ydotool 1.0.3+ command shape it emits, and rejects semantically incompatible
+  CLIs even when a daemon socket exists. Hyprland dispatch validation handles
+  exit-zero errors, modifier chords use the v0.4.3 delay, and an xdotool command
+  that starts but fails is never replayed through ydotool.
+- Open Target Discovery now resolves the selected Linux editor or terminal
+  through the current private open-target command path. Command-path drift is
+  reported before the feature changes the main bundle, so enabled-feature
+  acceptance cannot mistake a partially patched bundle for success.
+- Repeated current-DMG patch passes now keep composed native and frameless
+  titlebars, external-open handling, Record & Replay, and Browser Use runtime
+  resolution byte-identical. Complete markers no longer depend on
+  function-local minified aliases, while partial markers remain fail-soft and
+  leave drifted assets untouched.
+- Remote mobile control now patches the current 26.721 dual-gate enablement
+  bridge instead of reporting it as already applied. Startup auto-connects the
+  environment owned by this Desktop without overwriting saved choices for
+  other enrolled hosts.
+- Updater-managed npm Codex CLI installs now serialize across daemon, launcher,
+  and status processes. If npm reports the exact stale Arborist retirement
+  directory failure, automatic paths preserve the working CLI and direct the
+  user to read-only diagnostics. The explicit `repair-cli` command revalidates
+  the condition under the shared lock, records crash-durable quarantines, and
+  retries npm once per explicit invocation without discarding failed recovery
+  state or concurrent updater state. A parent-independent bounded supervisor
+  retains the lock while mutating npm children run without inheriting it,
+  terminates their complete process group, and releases the lock only after
+  cleanup if the updater parent or supervisor exits abruptly or the npm leader
+  leaves a background descendant.
+  Late routine CLI checks revalidate both the repair journal and their original
+  CLI state before persisting a result. Missing-CLI preflight also re-resolves a
+  CLI installed while it waited for the lock before consulting npm.
+- Concurrent updater entrypoints now serialize state reloads and cache cleanup
+  before persisting startup state. A second process can no longer prune an
+  active rebuild workspace, while forced checks wait for startup maintenance
+  instead of returning without checking upstream, and manual ready-package
+  installs cannot race daemon reconciliation into launching the same install
+  twice.
+- Updater rebuild workspaces now retain the Git identity of the wrapper source
+  after `.git` is stripped, so installed build metadata and packaged
+  update-builder metadata report the wrapper commit instead of `unknown`.
+- V2 pets now look toward the live pointer position after successful Linux
+  Computer Use click, scroll, and drag actions, then return to their normal
+  animation. The bridge is isolated per app instance and fails softly when its
+  private runtime socket is unavailable.
+- The updater daemon now detects that a package upgrade replaced its binary
+  on disk and exits with a nonzero status so systemd's `Restart=on-failure`
+  relaunches it on the new binary. Previously a running daemon survived every
+  upgrade and kept staging rebuild workspaces with outdated logic, failing
+  each periodic update until the next reboot.
+- Launcher startup no longer requires Python's pidfd wrappers for normal
+  launcher lock acquire and release. Pidfd remains reserved for the
+  identity-verified stale Electron termination path.
+- Approval notifications now preserve the upstream Approve, Approve for
+  session, and Decline actions on Linux. A small freedesktop notification
+  bridge forwards the action and close signals that Electron's Linux
+  notification backend does not expose, with the existing View-only Electron
+  notification retained as a fail-soft fallback.
+- The opt-in `frameless-titlebar` feature now removes Electron-drawn window
+  controls from Quick Chat as well as the primary window, keeping compositor-
+  managed decoration behavior consistent across both window types.
+- Remote mobile cold starts now select one runtime owner deterministically.
+  Explicit systemd user-service configuration takes precedence over the
+  Desktop app-server and standalone fallback, while a versioned Desktop marker
+  prevents stale or forged marker content from suppressing the fallback.
+- Remote mobile device keys now use a bounded, versioned file store with
+  serialized read-modify-write updates and crash-durable atomic replacement.
+  Unsafe paths, file types, ownership, permissions, malformed records, and
+  oversized stores fail closed instead of being followed or silently erased.
+- Remote mobile control now patches the current upstream webview chunks for
+  feature sync, settings visibility, host enablement, and active conversation
+  status. Revoking the final controller now also clears the current mobile setup
+  state. The enablement bridge accepts the current bundle ordering where its log
+  marker is declared after the request handler.
+- Automated user-local updates no longer inherit or set developer overrides
+  that could replace a running Electron app or bypass DMG acceptance. Manual
+  and timer rebuilds now fail safely at promotion, transactional installs retain
+  only the immediately previous app backup, and drift issue automation mutates
+  only issues carrying its valid fingerprint marker.
+- The Add Project folder picker is no longer parented to the Codex window on
+  Linux X11. This avoids a GNOME Shell modal input grab that could lock desktop
+  input and flood system logs, while preserving parented dialogs on Wayland,
+  macOS, and Windows.
+- Completed thread resume and turn submission once again use the upstream
+  conversation ownership lifecycle. Removing the Linux-only ownership reset
+  and submit-time reclaim avoids false ownership after failed turn starts and
+  races between windows.
+- Updater DMG downloads now publish crash-durable, content-addressed files only
+  after a complete streamed download. Concurrent daemon and wrapper rebuilds
+  cannot truncate or replace each other's input, and DMG hashing stays bounded
+  in memory in both the updater and acceptance engine. A shared cache lease
+  now bounds retained downloads to the state-referenced DMG and safely removes
+  old hashes and temporary files abandoned by interrupted downloads.
+- Linux settings search no longer shows unavailable macOS Dock icon controls or
+  Suggested prompts results that do not render in the generated Linux settings
+  page.
+- Read Aloud no longer crashes the generated Linux desktop settings page after
+  its shared controls moved from React hooks to class components. The feature's
+  enabled state, voice setup actions, and speech pace now use the same
+  class-based global-state bridge as the rest of that page.
+- Cold launches no longer stall for a full second between acquiring the
+  launcher lock and spawning Electron. The CLI version log line reads the
+  probe result through command substitution, and the probe's watchdog
+  subshell inherited that pipe: its `sleep 1` child survived the watchdog
+  kill and held the pipe open until the sleep expired, so even a CLI that
+  answers `--version` in ~50 ms blocked the launch path for ~1 s. The
+  watchdog now runs detached from the caller's stdout/stderr, cutting that
+  launch phase from ~1010 ms to ~74 ms and making the window (and GNOME's
+  startup feedback) appear about a second sooner on every cold start.
+
+### Changed
+
+- Local app generation is transactional: `install.sh` builds and validates a
+  sibling candidate before replacing `codex-app`, keeps the working app on
+  rejected or inconclusive candidates, and uses atomic directory exchange plus
+  a recovery journal so interruption cannot remove the canonical app path.
+- Cold starts overlap the webview server boot with the rest of launcher
+  startup and run the five bundled plugin cache syncs concurrently. The
+  launcher now spawns the Python webview server, does CLI lookup and cache
+  syncs while it boots, and only then waits for readiness and verifies the
+  origin — still strictly before Electron launches. The shared bundled
+  marketplace metadata is staged exactly once before the concurrent syncs
+  instead of being rewritten inside each sync. Measured on a warm-cache cold
+  start, the sync block drops from ~285 ms to ~110 ms and the webview wait
+  from ~150 ms to ~35 ms, putting Electron spawn ~330 ms earlier.
+- The launcher now passes `--disable-dev-shm-usage` to Electron only when
+  `/dev/shm` is missing, not writable, or smaller than 1 GiB (the container
+  case the flag exists for). On regular desktops Chromium's renderer/GPU
+  shared-memory buffers stay in RAM-backed `/dev/shm` instead of disk-backed
+  temp storage, which improves rendering performance. Override with
+  `CODEX_ELECTRON_DISABLE_DEV_SHM_USAGE=auto|0|1`.
+- The launcher now adds `--force-renderer-accessibility` only when an
+  assistive technology is detected (Orca or brltty running, the GNOME
+  screen-reader setting, the AT-SPI accessibility state that
+  `codex-computer-use-linux setup` enables — `org.a11y.Status IsEnabled` or
+  `toolkit-accessibility` — or the `GNOME_ACCESSIBILITY` /
+  `QT_LINUX_ACCESSIBILITY_ALWAYS_ON` / `ACCESSIBILITY_ENABLED` env markers).
+  Keeping the Chromium accessibility engine on in every renderer measurably
+  slows the webview UI, and the WSLg and wayland-gpu profiles already
+  skipped it for that reason. Session-bus probes are watchdog-capped at
+  0.5 s so a broken bus cannot delay launch.
+  `CODEX_FORCE_RENDERER_ACCESSIBILITY=1|0` still overrides the detection in
+  both directions.
+- Refactored ASAR patching internals so `scripts/patch-linux-window-ui.js` is a
+  CLI-only entrypoint and patch descriptors/implementations live under
+  `scripts/patches/`.
+
+### Removed
+
+- Removed legacy external Linux feature patch contracts:
+  `entrypoints.patches`, `entrypoints.mainBundlePatch`, `.patches`/`.default`
+  descriptor exports, the unsuffixed `extracted-app` phase, and
+  `patch-linux-window-ui.js` module exports.
+
+## [0.8.4] - 2026-06-20
+
+### Added
+
 - The `make setup-native` Linux feature picker can now present a GUI checklist
   (zenity or kdialog) instead of the terminal-only numbered prompt, pre-checked
   with the currently-enabled features. It falls back to the terminal picker when
@@ -53,9 +302,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   bundled plugin registry so the app keeps `read-aloud` installed, and the
   launcher syncs the plugin cache so new Codex windows expose the MCP tools
   through the same auto-install path as Computer Use.
+- The Home Manager and NixOS modules gained a
+  `programs.codexDesktopLinux.cliPackage` option that wraps the installed Codex
+  Desktop launcher (and its `.desktop` entry) so it always starts with
+  `CODEX_CLI_PATH` pointing at the chosen CLI. Because the path is baked into the
+  launcher instead of exported as a session variable, Codex Desktop reliably
+  finds the Codex CLI regardless of how it is launched (graphical autostart,
+  application launcher, terminal, or warm-start handoff), even when the Nix
+  profile is not on the graphical session `PATH`, and the change takes effect on
+  the next app launch with no re-login. When unset it falls back to
+  `remoteControl.package` if the remote-control service is enabled. This avoids
+  the `Unable to locate the Codex CLI binary. Set CODEX_CLI_PATH ...` startup
+  failure.
 
 ### Fixed
 
+- `codex-update-manager` no longer depends on the `fs4` crate for updater check
+  serialization. The updater now uses `std::fs::File::try_lock`, preserves the
+  existing non-blocking `check.lock` behavior when another check is active, and
+  adds regression coverage for `WouldBlock` lock contention semantics.
+- The avatar overlay is focusable on Linux so inline pet reply inputs can accept
+  keyboard input after being clicked, while still staying above the main Codex
+  window as an overlay.
+- Plugin marketplace browsing now preserves upstream's `remote_plugin`
+  feature sync on Linux, so current app servers can load the remote OpenAI
+  curated catalog instead of falling back to only locally installed plugins.
+- The opt-in `remote-mobile-control` cold-start hook no longer removes
+  `~/.local/bin/codex` when the launcher is actively using that symlink as
+  `CODEX_CLI_PATH`.
 - The in-app updater no longer quits into a broken `pkexec` install path when a
   minimal window-manager session has no graphical polkit authentication agent;
   it keeps the rebuilt package ready and reports a terminal `sudo

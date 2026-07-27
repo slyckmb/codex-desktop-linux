@@ -1,17 +1,15 @@
 use crate::windowing::registry::{
     self, COSMIC_WAYLAND_BACKEND, GNOME_SHELL_EXTENSION_BACKEND, GNOME_SHELL_INTROSPECT_BACKEND,
-    HYPRLAND_BACKEND, KWIN_BACKEND,
+    HYPRLAND_BACKEND, I3_BACKEND, KWIN_BACKEND, NIRI_BACKEND, X11_BACKEND,
 };
+use crate::ydotool;
 use schemars::JsonSchema;
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, HashMap},
     env, fs,
     fs::OpenOptions,
-    os::unix::{
-        fs::MetadataExt,
-        net::{UnixDatagram, UnixStream},
-    },
+    os::unix::{fs::MetadataExt, net::UnixDatagram},
     path::{Path, PathBuf},
     process::Command,
 };
@@ -21,6 +19,7 @@ const DESKTOP_ENV_KEYS: &[&str] = &[
     "DESKTOP_SESSION",
     "DISPLAY",
     "HYPRLAND_INSTANCE_SIGNATURE",
+    "NIRI_SOCKET",
     "XAUTHORITY",
     "YDOTOOL_SOCKET",
     "XDG_SESSION_DESKTOP",
@@ -29,6 +28,47 @@ const DESKTOP_ENV_KEYS: &[&str] = &[
     "XDG_RUNTIME_DIR",
     "XDG_SESSION_TYPE",
 ];
+const FORCE_YDOTOOL_KEYBOARD_ENV_KEYS: &[&str] = &[
+    "COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD",
+    "CODEX_COMPUTER_USE_FORCE_YDOTOOL_KEYBOARD",
+];
+const FORCE_YDOTOOL_POINTER_ENV_KEYS: &[&str] = &[
+    "COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER",
+    "CODEX_COMPUTER_USE_FORCE_YDOTOOL_POINTER",
+];
+const FORCE_XDOTOOL_KEYBOARD_ENV_KEYS: &[&str] = &[
+    "COMPUTER_USE_LINUX_FORCE_XDOTOOL_KEYBOARD",
+    "CODEX_COMPUTER_USE_FORCE_XDOTOOL_KEYBOARD",
+];
+const FORCE_PORTAL_KEYBOARD_ENV_KEYS: &[&str] = &[
+    "COMPUTER_USE_LINUX_FORCE_PORTAL_KEYBOARD",
+    "CODEX_COMPUTER_USE_FORCE_PORTAL_KEYBOARD",
+];
+const FORCE_PORTAL_POINTER_ENV_KEYS: &[&str] = &[
+    "COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER",
+    "CODEX_COMPUTER_USE_FORCE_PORTAL_POINTER",
+];
+const PORTAL_DEVICE_KEYBOARD: u32 = 1;
+const PORTAL_DEVICE_POINTER: u32 = 2;
+const PORTAL_CURSOR_MODE_HIDDEN: u32 = 1;
+const PORTAL_SOURCE_MONITOR: u32 = 1;
+const SCREENCAST_CURSOR_MODE_VERSION: u32 = 2;
+const REMOTE_DESKTOP_KEYBOARD_METHODS: &[&str] = &[
+    "CreateSession",
+    "SelectDevices",
+    "Start",
+    "NotifyKeyboardKeycode",
+    "NotifyKeyboardKeysym",
+];
+const REMOTE_DESKTOP_POINTER_METHODS: &[&str] = &[
+    "CreateSession",
+    "SelectDevices",
+    "Start",
+    "NotifyPointerMotionAbsolute",
+    "NotifyPointerButton",
+    "NotifyPointerAxisDiscrete",
+];
+const SCREENCAST_POINTER_METHODS: &[&str] = &["SelectSources"];
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct DoctorReport {
@@ -87,6 +127,7 @@ pub struct PlatformReport {
 pub struct PortalReport {
     pub desktop_portal: Check,
     pub remote_desktop: Check,
+    pub remote_desktop_keyboard: Check,
     pub screencast: Check,
     pub screenshot: Check,
     pub input_capture: Check,
@@ -106,9 +147,11 @@ pub struct AccessibilityReport {
 pub struct WindowingReport {
     pub gnome_shell_introspect: Check,
     pub codex_gnome_shell_extension: Check,
+    pub codex_gnome_shell_extension_screenshot: Check,
     pub cosmic_helper: Check,
     pub kwin: Check,
     pub hyprland: Check,
+    pub niri: Check,
     pub backends: BTreeMap<String, Check>,
     pub can_list_windows: bool,
     pub can_focus_apps: bool,
@@ -122,6 +165,9 @@ pub struct InputReport {
     pub ydotoold: Check,
     pub ydotool_socket: Check,
     pub uinput: Check,
+    /// X11 XTEST keyboard backend. Preferred over ydotool on X11 sessions,
+    /// where raw evdev scancodes are re-mapped by the active XKB layout.
+    pub xdotool: Check,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -176,9 +222,22 @@ pub fn doctor_report() -> DoctorReport {
     let accessibility = accessibility_report();
     let windowing = windowing_report(&platform);
     let input = input_report();
-    let readiness = readiness_report(&platform, &portals, &accessibility, &windowing, &input);
+    let readiness = readiness_report_with_portal_keyboard(
+        &platform,
+        &portals.remote_desktop_keyboard,
+        &accessibility,
+        &windowing,
+        &input,
+    );
 
-    let capabilities = capability_map(&platform, &portals, &accessibility, &windowing, &input);
+    let capabilities = capability_map_with_portal_keyboard(
+        &platform,
+        &portals,
+        &portals.remote_desktop_keyboard,
+        &accessibility,
+        &windowing,
+        &input,
+    );
 
     DoctorReport {
         platform,
@@ -193,9 +252,28 @@ pub fn doctor_report() -> DoctorReport {
 
 /// Derive the per-layer backend capability map from the individual checks. Lists
 /// are ordered best-first and mirror the order the tool actually tries them.
+#[cfg(test)]
 fn capability_map(
     platform: &PlatformReport,
     portals: &PortalReport,
+    accessibility: &AccessibilityReport,
+    windowing: &WindowingReport,
+    input: &InputReport,
+) -> CapabilityMap {
+    capability_map_with_portal_keyboard(
+        platform,
+        portals,
+        &portals.remote_desktop_keyboard,
+        accessibility,
+        windowing,
+        input,
+    )
+}
+
+fn capability_map_with_portal_keyboard(
+    platform: &PlatformReport,
+    portals: &PortalReport,
+    remote_desktop_keyboard: &Check,
     accessibility: &AccessibilityReport,
     windowing: &WindowingReport,
     input: &InputReport,
@@ -205,16 +283,39 @@ fn capability_map(
     if input.uinput.ok {
         input_backends.push("abs_pointer".to_string());
     }
-    if portals.remote_desktop.ok {
+    let force_ydotool = env_flag_enabled_any(FORCE_YDOTOOL_KEYBOARD_ENV_KEYS);
+    let force_xdotool = env_flag_enabled_any(FORCE_XDOTOOL_KEYBOARD_ENV_KEYS);
+    let portal_pointer_available = portal_pointer_input_available(platform, portals);
+    let portal_keyboard_available =
+        portal_keyboard_input_available(platform, remote_desktop_keyboard);
+    let portal_available = portal_pointer_available || portal_keyboard_available;
+    let portal_forced_for_all_input = portal_pointer_available
+        && portal_keyboard_available
+        && force_portal_for_all_input(
+            env_flag_enabled_any(FORCE_PORTAL_POINTER_ENV_KEYS),
+            env_flag_enabled_any(FORCE_PORTAL_KEYBOARD_ENV_KEYS),
+            env_flag_enabled_any(FORCE_YDOTOOL_POINTER_ENV_KEYS),
+            force_ydotool,
+        );
+    if should_advertise_xdotool(platform, input, force_ydotool, force_xdotool) {
+        input_backends.push("xdotool".to_string());
+    }
+    if portal_available && portal_forced_for_all_input {
         input_backends.push("portal".to_string());
     }
-    if input.ydotool_socket.ok {
+    if input.ydotool.ok && input.ydotool_socket.ok {
         input_backends.push("ydotool".to_string());
+    }
+    if portal_available && !portal_forced_for_all_input {
+        input_backends.push("portal".to_string());
     }
 
     let mut screenshot_backends = Vec::new();
     if platform.gnome_shell_version.ok {
         screenshot_backends.push("gnome_shell".to_string());
+    }
+    if windowing.codex_gnome_shell_extension_screenshot.ok {
+        screenshot_backends.push("gnome_shell_extension".to_string());
     }
     if portals.screenshot.ok {
         screenshot_backends.push("portal".to_string());
@@ -225,11 +326,24 @@ fn capability_map(
     }
 
     let mut window_backends = Vec::new();
+    let x11_available = windowing
+        .backends
+        .get(X11_BACKEND)
+        .is_some_and(|check| check.ok);
+    let prefer_x11_over_introspect = windowing.gnome_shell_introspect.ok
+        && x11_available
+        && registry::backend_can_exact_focus(X11_BACKEND);
     if windowing.codex_gnome_shell_extension.ok {
         window_backends.push("gnome_shell_extension".to_string());
     }
+    if prefer_x11_over_introspect {
+        window_backends.push(X11_BACKEND.to_string());
+    }
     if windowing.gnome_shell_introspect.ok {
         window_backends.push("gnome_introspect".to_string());
+    }
+    if windowing.cosmic_helper.ok {
+        window_backends.push("cosmic".to_string());
     }
     if windowing.kwin.ok {
         window_backends.push("kwin".to_string());
@@ -237,8 +351,21 @@ fn capability_map(
     if windowing.hyprland.ok {
         window_backends.push("hyprland".to_string());
     }
-    if windowing.cosmic_helper.ok {
-        window_backends.push("cosmic".to_string());
+    if windowing.niri.ok {
+        window_backends.push(NIRI_BACKEND.to_string());
+    }
+    // i3 and the generic X11/EWMH backend have no dedicated WindowingReport
+    // field; read them from the probe map (tried last) so the capability list
+    // matches the backends the registry will actually use.
+    if windowing
+        .backends
+        .get(I3_BACKEND)
+        .is_some_and(|check| check.ok)
+    {
+        window_backends.push(I3_BACKEND.to_string());
+    }
+    if x11_available && !prefer_x11_over_introspect {
+        window_backends.push(X11_BACKEND.to_string());
     }
 
     let mut accessibility_backends = Vec::new();
@@ -341,17 +468,48 @@ fn hydrate_desktop_env_from_systemd_user() {
 }
 
 fn hydrate_desktop_env_from_map(process_env: &HashMap<String, String>) {
-    for key in DESKTOP_ENV_KEYS {
-        if env_var(key).is_some() {
-            continue;
-        }
-        if let Some(value) = process_env
-            .get(*key)
-            .filter(|value| !value.trim().is_empty())
-        {
-            env::set_var(key, value);
-        }
+    let current_env = DESKTOP_ENV_KEYS
+        .iter()
+        .filter_map(|key| env_var(key).map(|value| ((*key).to_string(), value)))
+        .collect();
+    for (key, value) in desktop_env_hydration_updates(&current_env, process_env) {
+        env::set_var(key, value);
     }
+}
+
+fn desktop_env_hydration_updates(
+    current_env: &HashMap<String, String>,
+    source_env: &HashMap<String, String>,
+) -> Vec<(&'static str, String)> {
+    // A nested X11 desktop can share a user manager with a Wayland host.
+    // Preserve its complete process-local session instead of grafting the
+    // host's WAYLAND_DISPLAY onto it.
+    let preserve_native_x11 = current_env
+        .get("XDG_SESSION_TYPE")
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("x11"))
+        && current_env
+            .get("DISPLAY")
+            .is_some_and(|value| !value.trim().is_empty())
+        && current_env
+            .get("WAYLAND_DISPLAY")
+            .is_none_or(|value| value.trim().is_empty());
+
+    DESKTOP_ENV_KEYS
+        .iter()
+        .filter_map(|key| {
+            if current_env
+                .get(*key)
+                .is_some_and(|value| !value.trim().is_empty())
+                || preserve_native_x11 && *key == "WAYLAND_DISPLAY"
+            {
+                return None;
+            }
+            source_env
+                .get(*key)
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| (*key, value.clone()))
+        })
+        .collect()
 }
 
 fn desktop_process_environments() -> Vec<HashMap<String, String>> {
@@ -529,10 +687,12 @@ fn platform_report() -> PlatformReport {
 }
 
 fn portal_report() -> PortalReport {
+    let (remote_desktop, remote_desktop_keyboard, screencast) = remote_desktop_portal_checks();
     PortalReport {
         desktop_portal: bus_name_check("org.freedesktop.portal.Desktop"),
-        remote_desktop: portal_interface_check("org.freedesktop.portal.RemoteDesktop"),
-        screencast: portal_interface_check("org.freedesktop.portal.ScreenCast"),
+        remote_desktop,
+        remote_desktop_keyboard,
+        screencast,
         screenshot: portal_interface_check("org.freedesktop.portal.Screenshot"),
         input_capture: portal_interface_check("org.freedesktop.portal.InputCapture"),
         mutter_remote_desktop: bus_name_check("org.gnome.Mutter.RemoteDesktop"),
@@ -567,9 +727,15 @@ fn windowing_report(platform: &PlatformReport) -> WindowingReport {
     };
     let gnome_shell_introspect = backend_check(GNOME_SHELL_INTROSPECT_BACKEND);
     let codex_gnome_shell_extension = backend_check(GNOME_SHELL_EXTENSION_BACKEND);
+    let codex_gnome_shell_extension_screenshot = gdbus_introspect_contains(
+        crate::identity::DBUS_SERVICE,
+        crate::identity::DBUS_OBJECT_PATH,
+        "CaptureScreenshot",
+    );
     let cosmic_helper = backend_check(COSMIC_WAYLAND_BACKEND);
     let kwin = backend_check(KWIN_BACKEND);
     let hyprland = backend_check(HYPRLAND_BACKEND);
+    let niri = backend_check(NIRI_BACKEND);
     let backends = probes
         .iter()
         .map(|probe| (probe.id.to_string(), check_from_backend_probe(probe)))
@@ -578,26 +744,32 @@ fn windowing_report(platform: &PlatformReport) -> WindowingReport {
     let can_focus_apps = probes.iter().any(|probe| probe.can_focus_apps);
     let can_focus_windows = probes.iter().any(|probe| probe.can_focus_windows);
     let note = if can_list_windows {
-        if cosmic_helper.ok && is_cosmic_wayland_platform(platform) {
+        if !can_focus_windows {
+            "A window listing backend is available for list_windows, but focused-window and targeted-input verification are unavailable (for example wmctrl is present but xprop is missing on X11)."
+        } else if cosmic_helper.ok && is_cosmic_wayland_platform(platform) {
             "A COSMIC Wayland window backend is available for list_windows, focused_window, and targeted input verification."
         } else if kwin.ok {
             "A KWin/Plasma window backend is available for list_windows, focused_window, and targeted input verification."
         } else if hyprland.ok {
             "A Hyprland window backend is available for list_windows, focused_window, and targeted input verification."
+        } else if niri.ok {
+            "A Niri window backend is available for list_windows, focused_window, and targeted input verification."
         } else {
-            "A GNOME window listing backend is available for list_windows, focused_window, and targeted input verification."
+            "A window listing backend is available for list_windows, focused_window, and targeted input verification."
         }
     } else {
-        "Window listing is unavailable or denied. Computer Use can still use screenshots, AT-SPI, and global ydotool input, but targeted window input cannot be verified. On GNOME, run setup_window_targeting to install the optional GNOME Shell extension backend. On COSMIC, ensure the bundled COSMIC helper is present and can connect to the session. On KDE/Plasma, ensure KWin exposes org.kde.KWin scripting on the session bus. On Hyprland, ensure hyprctl is available in the session."
+        "Window listing is unavailable or denied. Computer Use can still use screenshots, AT-SPI, and global ydotool input, but targeted window input cannot be verified. On GNOME, run setup_window_targeting to install the optional GNOME Shell extension backend. On COSMIC, ensure the bundled COSMIC helper is present and can connect to the session. On KDE/Plasma, ensure KWin exposes org.kde.KWin scripting on the session bus. On Hyprland, ensure hyprctl is available in the session. On Niri, ensure NIRI_SOCKET is available and niri msg can reach the active compositor."
     }
     .to_string();
 
     WindowingReport {
         gnome_shell_introspect,
         codex_gnome_shell_extension,
+        codex_gnome_shell_extension_screenshot,
         cosmic_helper,
         kwin,
         hyprland,
+        niri,
         backends,
         can_list_windows,
         can_focus_apps,
@@ -616,16 +788,37 @@ fn check_from_backend_probe(probe: &registry::BackendProbe) -> Check {
 
 fn input_report() -> InputReport {
     InputReport {
-        ydotool: command_path_check("ydotool"),
+        ydotool: match ydotool::ensure_supported() {
+            Ok(support) => Check::ok(support.detail),
+            Err(detail) => Check::fail(detail),
+        },
         ydotoold: process_check("ydotoold"),
         ydotool_socket: ydotool_socket_check(),
         uinput: read_write_path_check(Path::new("/dev/uinput")),
+        xdotool: command_path_check("xdotool"),
     }
 }
 
+#[cfg(test)]
 fn readiness_report(
     platform: &PlatformReport,
     portals: &PortalReport,
+    accessibility: &AccessibilityReport,
+    windowing: &WindowingReport,
+    input: &InputReport,
+) -> ReadinessReport {
+    readiness_report_with_portal_keyboard(
+        platform,
+        &portals.remote_desktop_keyboard,
+        accessibility,
+        windowing,
+        input,
+    )
+}
+
+fn readiness_report_with_portal_keyboard(
+    platform: &PlatformReport,
+    remote_desktop_keyboard: &Check,
     accessibility: &AccessibilityReport,
     windowing: &WindowingReport,
     input: &InputReport,
@@ -635,7 +828,8 @@ fn readiness_report(
     let can_query_windows = windowing.can_list_windows;
     let can_focus_apps = windowing.can_focus_apps;
     let can_focus_windows = windowing.can_focus_windows;
-    let can_send_development_input = can_send_development_input(portals, input);
+    let can_send_development_input =
+        can_send_development_input(platform, remote_desktop_keyboard, input);
 
     if !can_build_accessibility_tree {
         blockers.push(
@@ -662,7 +856,7 @@ fn readiness_report(
 
     if !can_send_development_input {
         blockers.push(
-            "Development input is unavailable; enable read/write /dev/uinput, XDG RemoteDesktop portal input, or ydotool with a connectable ydotoold socket."
+            "Development keyboard input is unavailable; enable XDG RemoteDesktop portal input on Wayland, xdotool with DISPLAY on X11, or ydotool with a connectable ydotoold socket. Read/write /dev/uinput alone provides only absolute pointer input."
                 .to_string(),
         );
     }
@@ -682,7 +876,7 @@ fn readiness_report(
     } else if !can_focus_windows {
         "Enable an exact-focus window backend before using window_id, title, or terminal-targeted input.".to_string()
     } else if !can_send_development_input {
-        "Enable a supported input backend: grant read/write /dev/uinput, enable the XDG RemoteDesktop portal, or start ydotoold with a socket accessible to this desktop user."
+        "Enable a keyboard-capable input backend: enable the XDG RemoteDesktop portal on Wayland, install xdotool for X11, or start ydotoold with a socket accessible to this desktop user."
             .to_string()
     } else {
         "Computer Use is ready: AT-SPI tree support, window targeting, and a Linux input backend are available."
@@ -701,10 +895,27 @@ fn readiness_report(
     }
 }
 
-fn can_send_development_input(portals: &PortalReport, input: &InputReport) -> bool {
-    input.uinput.ok
-        || portals.remote_desktop.ok
-        || input.ydotool.ok && input.ydotoold.ok && input.ydotool_socket.ok
+fn can_send_development_input(
+    platform: &PlatformReport,
+    remote_desktop_keyboard: &Check,
+    input: &InputReport,
+) -> bool {
+    let force_ydotool = env_flag_enabled_any(FORCE_YDOTOOL_KEYBOARD_ENV_KEYS);
+    let force_xdotool = env_flag_enabled_any(FORCE_XDOTOOL_KEYBOARD_ENV_KEYS);
+    portal_keyboard_input_available(platform, remote_desktop_keyboard)
+        || should_advertise_xdotool(platform, input, force_ydotool, force_xdotool)
+        || input.ydotool.ok && input.ydotool_socket.ok
+}
+
+fn portal_pointer_input_available(platform: &PlatformReport, portals: &PortalReport) -> bool {
+    platform_is_wayland(platform) && portals.remote_desktop.ok
+}
+
+fn portal_keyboard_input_available(
+    platform: &PlatformReport,
+    remote_desktop_keyboard: &Check,
+) -> bool {
+    platform_is_wayland(platform) && remote_desktop_keyboard.ok
 }
 
 fn is_cosmic_wayland_platform(platform: &PlatformReport) -> bool {
@@ -790,6 +1001,48 @@ fn command_path_check(command: &str) -> Check {
     command_check("sh", &["-c", &format!("command -v {command}")])
 }
 
+fn platform_is_wayland(platform: &PlatformReport) -> bool {
+    match platform.xdg_session_type.as_deref() {
+        Some(value) => value.eq_ignore_ascii_case("wayland"),
+        None => platform
+            .wayland_display
+            .as_deref()
+            .is_some_and(|display| !display.trim().is_empty()),
+    }
+}
+
+fn should_advertise_xdotool(
+    platform: &PlatformReport,
+    input: &InputReport,
+    force_ydotool: bool,
+    force_xdotool: bool,
+) -> bool {
+    !force_ydotool
+        && input.xdotool.ok
+        && platform
+            .display
+            .as_deref()
+            .is_some_and(|display| !display.trim().is_empty())
+        && (force_xdotool || !platform_is_wayland(platform))
+}
+
+fn env_flag_enabled_any(keys: &[&str]) -> bool {
+    keys.iter()
+        .any(|key| env::var(key).ok().as_deref() == Some("1"))
+}
+
+fn force_portal_for_all_input(
+    force_portal_pointer: bool,
+    force_portal_keyboard: bool,
+    force_ydotool_pointer: bool,
+    force_ydotool_keyboard: bool,
+) -> bool {
+    force_portal_pointer
+        && force_portal_keyboard
+        && !force_ydotool_pointer
+        && !force_ydotool_keyboard
+}
+
 fn process_check(process_name: &str) -> Check {
     command_check("pgrep", &["-a", process_name])
 }
@@ -807,20 +1060,9 @@ fn socket_connect_result(path: &Path) -> std::result::Result<(), String> {
         return Err(format!("missing: {}", path.display()));
     }
 
-    match UnixStream::connect(path) {
-        Ok(_) => Ok(()),
-        Err(stream_error) => {
-            match UnixDatagram::unbound().and_then(|socket| socket.connect(path)) {
-                Ok(()) => Ok(()),
-                Err(datagram_error) => Err(format!(
-                    "{}: stream: {}; datagram: {}",
-                    path.display(),
-                    stream_error,
-                    datagram_error
-                )),
-            }
-        }
-    }
+    UnixDatagram::unbound()
+        .and_then(|socket| socket.connect(path))
+        .map_err(|error| format!("{}: datagram: {error}", path.display()))
 }
 
 fn read_write_path_check(path: &Path) -> Check {
@@ -849,6 +1091,268 @@ fn portal_interface_check(interface: &str) -> Check {
             interface,
         ],
     )
+}
+
+fn remote_desktop_portal_checks() -> (Check, Check, Check) {
+    let introspection = portal_interface_check("org.freedesktop.portal.RemoteDesktop");
+    let screencast = portal_interface_check("org.freedesktop.portal.ScreenCast");
+    if !introspection.ok {
+        return (introspection.clone(), introspection, screencast);
+    }
+
+    let available_device_types = command_check_with_session_bus(
+        "busctl",
+        &[
+            "--user",
+            "get-property",
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.RemoteDesktop",
+            "AvailableDeviceTypes",
+        ],
+    );
+    let available_source_types = command_check_with_session_bus(
+        "busctl",
+        &[
+            "--user",
+            "get-property",
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.ScreenCast",
+            "AvailableSourceTypes",
+        ],
+    );
+    let screencast_version = command_check_with_session_bus(
+        "busctl",
+        &[
+            "--user",
+            "get-property",
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.ScreenCast",
+            "version",
+        ],
+    );
+    let available_cursor_modes = command_check_with_session_bus(
+        "busctl",
+        &[
+            "--user",
+            "get-property",
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.ScreenCast",
+            "AvailableCursorModes",
+        ],
+    );
+    let pointer = remote_desktop_pointer_check_from(
+        &introspection,
+        &screencast,
+        &available_device_types,
+        &available_source_types,
+        &screencast_version,
+        &available_cursor_modes,
+    );
+    let keyboard = remote_desktop_keyboard_check_from(&introspection, &available_device_types);
+    (pointer, keyboard, screencast)
+}
+
+fn remote_desktop_pointer_check_from(
+    introspection: &Check,
+    screencast: &Check,
+    available_device_types: &Check,
+    available_source_types: &Check,
+    screencast_version: &Check,
+    available_cursor_modes: &Check,
+) -> Check {
+    if !introspection.ok {
+        return Check::fail(introspection.detail.clone());
+    }
+    let missing_methods = missing_busctl_methods(introspection, REMOTE_DESKTOP_POINTER_METHODS);
+    if !missing_methods.is_empty() {
+        return Check::fail(format!(
+            "RemoteDesktop interface is missing required pointer methods: {}",
+            missing_methods.join(", ")
+        ));
+    }
+
+    if !screencast.ok {
+        return Check::fail(format!(
+            "ScreenCast interface is unavailable for portal pointer input: {}",
+            screencast.detail
+        ));
+    }
+    let missing_screencast_methods = missing_busctl_methods(screencast, SCREENCAST_POINTER_METHODS);
+    if !missing_screencast_methods.is_empty() {
+        return Check::fail(format!(
+            "ScreenCast interface is missing required pointer methods: {}",
+            missing_screencast_methods.join(", ")
+        ));
+    }
+
+    let device_types = match remote_desktop_device_types(available_device_types) {
+        Ok(device_types) => device_types,
+        Err(detail) => return Check::fail(detail),
+    };
+    if device_types & PORTAL_DEVICE_POINTER == 0 {
+        return Check::fail(format!(
+            "RemoteDesktop AvailableDeviceTypes={device_types} does not include pointer input"
+        ));
+    }
+
+    let source_types = match screencast_source_types(available_source_types) {
+        Ok(source_types) => source_types,
+        Err(detail) => return Check::fail(detail),
+    };
+    if source_types & PORTAL_SOURCE_MONITOR == 0 {
+        return Check::fail(format!(
+            "ScreenCast AvailableSourceTypes={source_types} does not include monitor sources"
+        ));
+    }
+
+    let version = match screencast_version_number(screencast_version) {
+        Ok(version) => version,
+        Err(detail) => return Check::fail(detail),
+    };
+    if version >= SCREENCAST_CURSOR_MODE_VERSION {
+        let cursor_modes = match screencast_cursor_modes(available_cursor_modes) {
+            Ok(cursor_modes) => cursor_modes,
+            Err(detail) => return Check::fail(detail),
+        };
+        if cursor_modes & PORTAL_CURSOR_MODE_HIDDEN == 0 {
+            return Check::fail(format!(
+                "ScreenCast AvailableCursorModes={cursor_modes} does not include hidden cursor mode"
+            ));
+        }
+
+        return Check::ok(format!(
+            "pointer-capable RemoteDesktop portal (AvailableDeviceTypes={device_types}, AvailableSourceTypes={source_types}, ScreenCast version={version}, AvailableCursorModes={cursor_modes})"
+        ));
+    }
+
+    Check::ok(format!(
+        "pointer-capable RemoteDesktop portal (AvailableDeviceTypes={device_types}, AvailableSourceTypes={source_types}, ScreenCast version={version}, hidden cursor mode is the interface default)"
+    ))
+}
+
+fn remote_desktop_keyboard_check_from(
+    introspection: &Check,
+    available_device_types: &Check,
+) -> Check {
+    if !introspection.ok {
+        return Check::fail(introspection.detail.clone());
+    }
+
+    let missing_methods = missing_busctl_methods(introspection, REMOTE_DESKTOP_KEYBOARD_METHODS);
+    if !missing_methods.is_empty() {
+        return Check::fail(format!(
+            "RemoteDesktop interface is missing required keyboard methods: {}",
+            missing_methods.join(", ")
+        ));
+    }
+
+    let device_types = match remote_desktop_device_types(available_device_types) {
+        Ok(device_types) => device_types,
+        Err(detail) => return Check::fail(detail),
+    };
+    if device_types & PORTAL_DEVICE_KEYBOARD == 0 {
+        return Check::fail(format!(
+            "RemoteDesktop AvailableDeviceTypes={device_types} does not include keyboard input"
+        ));
+    }
+
+    Check::ok(format!(
+        "keyboard-capable RemoteDesktop portal (AvailableDeviceTypes={device_types})"
+    ))
+}
+
+fn missing_busctl_methods<'a>(introspection: &Check, methods: &'a [&'a str]) -> Vec<&'a str> {
+    methods
+        .iter()
+        .copied()
+        .filter(|method| !busctl_introspection_has_method(&introspection.detail, method))
+        .collect()
+}
+
+fn remote_desktop_device_types(available_device_types: &Check) -> Result<u32, String> {
+    if !available_device_types.ok {
+        return Err(format!(
+            "RemoteDesktop AvailableDeviceTypes is unavailable: {}",
+            available_device_types.detail
+        ));
+    }
+    parse_busctl_u32_property(&available_device_types.detail).ok_or_else(|| {
+        format!(
+            "RemoteDesktop AvailableDeviceTypes has an unexpected value: {}",
+            available_device_types.detail
+        )
+    })
+}
+
+fn screencast_source_types(available_source_types: &Check) -> Result<u32, String> {
+    if !available_source_types.ok {
+        return Err(format!(
+            "ScreenCast AvailableSourceTypes is unavailable: {}",
+            available_source_types.detail
+        ));
+    }
+    parse_busctl_u32_property(&available_source_types.detail).ok_or_else(|| {
+        format!(
+            "ScreenCast AvailableSourceTypes has an unexpected value: {}",
+            available_source_types.detail
+        )
+    })
+}
+
+fn screencast_cursor_modes(available_cursor_modes: &Check) -> Result<u32, String> {
+    if !available_cursor_modes.ok {
+        return Err(format!(
+            "ScreenCast AvailableCursorModes is unavailable: {}",
+            available_cursor_modes.detail
+        ));
+    }
+    parse_busctl_u32_property(&available_cursor_modes.detail).ok_or_else(|| {
+        format!(
+            "ScreenCast AvailableCursorModes has an unexpected value: {}",
+            available_cursor_modes.detail
+        )
+    })
+}
+
+fn screencast_version_number(screencast_version: &Check) -> Result<u32, String> {
+    if !screencast_version.ok {
+        return Err(format!(
+            "ScreenCast version is unavailable: {}",
+            screencast_version.detail
+        ));
+    }
+    parse_busctl_u32_property(&screencast_version.detail).ok_or_else(|| {
+        format!(
+            "ScreenCast version has an unexpected value: {}",
+            screencast_version.detail
+        )
+    })
+}
+
+fn busctl_introspection_has_method(detail: &str, method: &str) -> bool {
+    detail.lines().any(|line| {
+        let mut fields = line.split_whitespace();
+        fields
+            .next()
+            .is_some_and(|name| name.trim_start_matches('.') == method)
+            && fields.next() == Some("method")
+    })
+}
+
+fn parse_busctl_u32_property(detail: &str) -> Option<u32> {
+    let mut fields = detail.split_whitespace();
+    if fields.next()? != "u" {
+        return None;
+    }
+    let value = fields.next()?;
+    value
+        .strip_prefix("0x")
+        .map(|hex| u32::from_str_radix(hex, 16).ok())
+        .unwrap_or_else(|| value.parse().ok())
 }
 
 fn atspi_bus_address_check() -> Check {
@@ -912,6 +1416,27 @@ fn gdbus_call_check(destination: &str, object_path: &str, method: &str, args: &[
     ];
     command_args.extend_from_slice(args);
     command_check_with_session_bus("gdbus", &command_args)
+}
+
+fn gdbus_introspect_contains(destination: &str, object_path: &str, needle: &str) -> Check {
+    let check = command_check_with_session_bus(
+        "gdbus",
+        &[
+            "introspect",
+            "--session",
+            "--dest",
+            destination,
+            "--object-path",
+            object_path,
+        ],
+    );
+    if check.ok && check.detail.contains(needle) {
+        Check::ok(format!("DBus introspection includes {needle}"))
+    } else if check.ok {
+        Check::fail(format!("DBus introspection did not include {needle}"))
+    } else {
+        check
+    }
 }
 
 fn command_check(command: &str, args: &[&str]) -> Check {
@@ -980,9 +1505,17 @@ mod tests {
     }
 
     fn portal_report(remote_desktop: Check) -> PortalReport {
+        portal_report_with_keyboard(remote_desktop.clone(), remote_desktop)
+    }
+
+    fn portal_report_with_keyboard(
+        remote_desktop: Check,
+        remote_desktop_keyboard: Check,
+    ) -> PortalReport {
         PortalReport {
             desktop_portal: Check::ok("ok"),
             remote_desktop,
+            remote_desktop_keyboard,
             screencast: Check::fail("missing"),
             screenshot: Check::fail("missing"),
             input_capture: Check::fail("missing"),
@@ -1015,9 +1548,15 @@ mod tests {
             } else {
                 Check::fail("missing")
             },
+            codex_gnome_shell_extension_screenshot: if can_focus_windows {
+                Check::ok("ok")
+            } else {
+                Check::fail("missing")
+            },
             cosmic_helper: Check::fail("missing"),
             kwin: Check::fail("not a KWin session"),
             hyprland: Check::fail("not a Hyprland session"),
+            niri: Check::fail("not a Niri session"),
             backends: BTreeMap::new(),
             can_list_windows,
             can_focus_apps: true,
@@ -1046,6 +1585,7 @@ mod tests {
             ydotoold,
             ydotool_socket,
             uinput,
+            xdotool: Check::fail("missing xdotool"),
         }
     }
 
@@ -1114,6 +1654,45 @@ mod tests {
     }
 
     #[test]
+    fn desktop_env_hydration_includes_niri_socket() {
+        assert!(DESKTOP_ENV_KEYS.contains(&"NIRI_SOCKET"));
+    }
+
+    #[test]
+    fn desktop_env_hydration_preserves_explicit_native_x11() {
+        let current_env = HashMap::from([
+            ("DISPLAY".to_string(), ":90".to_string()),
+            ("XDG_SESSION_TYPE".to_string(), "x11".to_string()),
+        ]);
+        let host_env = HashMap::from([
+            ("WAYLAND_DISPLAY".to_string(), "wayland-0".to_string()),
+            (
+                "XDG_CURRENT_DESKTOP".to_string(),
+                "ubuntu:GNOME".to_string(),
+            ),
+        ]);
+
+        let updates = desktop_env_hydration_updates(&current_env, &host_env);
+
+        assert!(!updates.iter().any(|(key, _)| *key == "WAYLAND_DISPLAY"));
+        assert!(updates
+            .iter()
+            .any(|(key, value)| { *key == "XDG_CURRENT_DESKTOP" && value == "ubuntu:GNOME" }));
+    }
+
+    #[test]
+    fn desktop_env_hydration_still_imports_wayland_for_incomplete_sessions() {
+        let current_env = HashMap::new();
+        let host_env = HashMap::from([("WAYLAND_DISPLAY".to_string(), "wayland-0".to_string())]);
+
+        let updates = desktop_env_hydration_updates(&current_env, &host_env);
+
+        assert!(updates
+            .iter()
+            .any(|(key, value)| *key == "WAYLAND_DISPLAY" && value == "wayland-0"));
+    }
+
+    #[test]
     fn graphical_process_env_requires_display() {
         let with_display = HashMap::from([("DISPLAY".to_string(), ":0".to_string())]);
         let with_wayland =
@@ -1123,6 +1702,360 @@ mod tests {
         assert!(process_env_has_graphical_display(&with_display));
         assert!(process_env_has_graphical_display(&with_wayland));
         assert!(!process_env_has_graphical_display(&without_display));
+    }
+
+    #[test]
+    fn capabilities_prefer_xdotool_before_ydotool_on_x11() {
+        let mut platform = platform_report();
+        platform.xdg_session_type = Some("x11".to_string());
+        platform.wayland_display = None;
+        platform.display = Some(":0".to_string());
+        let input = InputReport {
+            ydotool: Check::ok("ydotool"),
+            ydotoold: Check::ok("ydotoold"),
+            ydotool_socket: Check::ok("connectable"),
+            uinput: Check::fail("missing"),
+            xdotool: Check::ok("xdotool"),
+        };
+
+        let capabilities = capability_map(
+            &platform,
+            &portal_report(Check::fail("missing")),
+            &accessibility_report(Check::fail("missing"), Check::fail("missing")),
+            &windowing_report(false, false),
+            &input,
+        );
+
+        assert_eq!(capabilities.input, ["xdotool", "ydotool"]);
+        assert_eq!(capabilities.preferred.input.as_deref(), Some("xdotool"));
+    }
+
+    #[test]
+    fn x11_diagnostics_ignore_portal_and_accept_xdotool() {
+        let mut platform = platform_report();
+        platform.xdg_session_type = Some("x11".to_string());
+        platform.wayland_display = None;
+        platform.display = Some(":0".to_string());
+        let portals = portal_report(Check::ok("org.freedesktop.portal.RemoteDesktop"));
+        let accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
+        let windowing = windowing_report(true, true);
+        let mut input = input_report(false);
+        input.xdotool = Check::ok("xdotool");
+
+        let capabilities = capability_map(&platform, &portals, &accessibility, &windowing, &input);
+        let readiness = readiness_report(&platform, &portals, &accessibility, &windowing, &input);
+
+        assert_eq!(capabilities.input, ["xdotool"]);
+        assert_eq!(capabilities.preferred.input.as_deref(), Some("xdotool"));
+        assert!(readiness.can_send_development_input);
+    }
+
+    #[test]
+    fn wayland_diagnostics_prefer_ydotool_before_portal() {
+        let platform = platform_report();
+        let portals = portal_report(Check::ok("org.freedesktop.portal.RemoteDesktop"));
+        let accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
+        let windowing = windowing_report(true, true);
+        let input = input_report_parts(
+            Check::ok("ydotool"),
+            Check::ok("ydotoold"),
+            Check::ok("connectable"),
+            Check::fail("missing uinput"),
+        );
+
+        let capabilities = capability_map(&platform, &portals, &accessibility, &windowing, &input);
+
+        assert_eq!(capabilities.input, ["ydotool", "portal"]);
+        assert_eq!(capabilities.preferred.input.as_deref(), Some("ydotool"));
+    }
+
+    #[test]
+    fn portal_force_order_requires_both_input_modalities() {
+        assert!(force_portal_for_all_input(true, true, false, false));
+        assert!(!force_portal_for_all_input(true, false, false, false));
+        assert!(!force_portal_for_all_input(true, true, true, false));
+        assert!(!force_portal_for_all_input(true, true, false, true));
+        assert_eq!(
+            FORCE_PORTAL_POINTER_ENV_KEYS,
+            [
+                "COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER",
+                "CODEX_COMPUTER_USE_FORCE_PORTAL_POINTER"
+            ]
+        );
+        assert_eq!(
+            FORCE_PORTAL_KEYBOARD_ENV_KEYS,
+            [
+                "COMPUTER_USE_LINUX_FORCE_PORTAL_KEYBOARD",
+                "CODEX_COMPUTER_USE_FORCE_PORTAL_KEYBOARD"
+            ]
+        );
+    }
+
+    fn remote_desktop_runtime_introspection() -> Check {
+        Check::ok(
+            "NAME TYPE SIGNATURE RESULT/VALUE FLAGS\n\
+             .CreateSession method a{sv} o -\n\
+             .SelectDevices method oa{sv} o -\n\
+             .Start method osa{sv} o -\n\
+             .NotifyPointerMotionAbsolute method oa{sv}udd - -\n\
+             .NotifyPointerButton method oa{sv}iu - -\n\
+             .NotifyPointerAxisDiscrete method oa{sv}ui - -\n\
+             .NotifyKeyboardKeycode method ouu - -\n\
+             .NotifyKeyboardKeysym method ouu - -\n\
+             .AvailableDeviceTypes property u 3 emits-change",
+        )
+    }
+
+    fn screencast_runtime_introspection() -> Check {
+        Check::ok(
+            "NAME TYPE SIGNATURE RESULT/VALUE FLAGS\n\
+             .SelectSources method oa{sv} o -",
+        )
+    }
+
+    #[test]
+    fn remote_desktop_portal_rejects_header_only_introspection() {
+        let introspection = Check::ok("NAME TYPE SIGNATURE RESULT/VALUE FLAGS");
+        let available_device_types = Check::ok("u 3");
+        let pointer = remote_desktop_pointer_check_from(
+            &introspection,
+            &screencast_runtime_introspection(),
+            &available_device_types,
+            &Check::ok("u 1"),
+            &Check::ok("u 2"),
+            &Check::ok("u 1"),
+        );
+        let keyboard = remote_desktop_keyboard_check_from(&introspection, &available_device_types);
+
+        assert!(!pointer.ok);
+        assert!(pointer.detail.contains("CreateSession"));
+        assert!(pointer.detail.contains("NotifyPointerButton"));
+        assert!(!keyboard.ok);
+        assert!(keyboard.detail.contains("NotifyKeyboardKeysym"));
+
+        let input = input_report_parts(
+            Check::ok("ydotool"),
+            Check::ok("ydotoold"),
+            Check::fail("no connectable ydotool socket"),
+            Check::ok("read/write: /dev/uinput"),
+        );
+        let platform = platform_report();
+        let portals = portal_report_with_keyboard(pointer, keyboard.clone());
+        let accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
+        let windowing = windowing_report(true, true);
+        let capabilities = capability_map(&platform, &portals, &accessibility, &windowing, &input);
+        let readiness = readiness_report(&platform, &portals, &accessibility, &windowing, &input);
+
+        assert!(!capabilities.input.iter().any(|backend| backend == "portal"));
+        assert!(!readiness.can_send_development_input);
+        assert!(!portals.remote_desktop_keyboard.ok);
+        assert!(portals
+            .remote_desktop_keyboard
+            .detail
+            .contains("NotifyKeyboardKeysym"));
+    }
+
+    #[test]
+    fn keyboard_only_portal_remains_advertised_without_pointer_capability() {
+        let platform = platform_report();
+        let keyboard = remote_desktop_keyboard_check_from(
+            &remote_desktop_runtime_introspection(),
+            &Check::ok("u 1"),
+        );
+        let portals = portal_report_with_keyboard(
+            Check::fail("ScreenCast AvailableSourceTypes=2 does not include monitor sources"),
+            keyboard.clone(),
+        );
+        let accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
+        let windowing = windowing_report(true, true);
+        let input = input_report_parts(
+            Check::fail("missing ydotool"),
+            Check::fail("ydotoold not running"),
+            Check::fail("no connectable ydotool socket"),
+            Check::fail("/dev/uinput: Permission denied"),
+        );
+
+        let capabilities = capability_map(&platform, &portals, &accessibility, &windowing, &input);
+        let readiness = readiness_report(&platform, &portals, &accessibility, &windowing, &input);
+
+        assert!(!portals.remote_desktop.ok);
+        assert!(portals.remote_desktop_keyboard.ok);
+        let serialized = serde_json::to_value(&portals).expect("serialize portal report");
+        assert_eq!(serialized["remote_desktop_keyboard"]["ok"], true);
+        assert_eq!(capabilities.input, ["portal"]);
+        assert_eq!(capabilities.preferred.input.as_deref(), Some("portal"));
+        assert!(readiness.can_send_development_input);
+    }
+
+    #[test]
+    fn remote_desktop_pointer_rejects_missing_screencast_contract() {
+        let check = remote_desktop_pointer_check_from(
+            &remote_desktop_runtime_introspection(),
+            &Check::ok("NAME TYPE SIGNATURE RESULT/VALUE FLAGS"),
+            &Check::ok("u 2"),
+            &Check::ok("u 1"),
+            &Check::ok("u 2"),
+            &Check::ok("u 1"),
+        );
+
+        assert!(!check.ok);
+        assert!(check.detail.contains("SelectSources"));
+    }
+
+    #[test]
+    fn remote_desktop_pointer_rejects_missing_monitor_source_type() {
+        let check = remote_desktop_pointer_check_from(
+            &remote_desktop_runtime_introspection(),
+            &screencast_runtime_introspection(),
+            &Check::ok("u 2"),
+            &Check::ok("u 2"),
+            &Check::ok("u 2"),
+            &Check::ok("u 1"),
+        );
+
+        assert!(!check.ok);
+        assert!(check.detail.contains("does not include monitor sources"));
+    }
+
+    #[test]
+    fn remote_desktop_portal_rejects_missing_keyboard_device_type() {
+        let check = remote_desktop_keyboard_check_from(
+            &remote_desktop_runtime_introspection(),
+            &Check::ok("u 2"),
+        );
+
+        assert!(!check.ok);
+        assert!(check.detail.contains("does not include keyboard input"));
+    }
+
+    #[test]
+    fn remote_desktop_pointer_rejects_missing_hidden_cursor_mode() {
+        let check = remote_desktop_pointer_check_from(
+            &remote_desktop_runtime_introspection(),
+            &screencast_runtime_introspection(),
+            &Check::ok("u 2"),
+            &Check::ok("u 1"),
+            &Check::ok("u 2"),
+            &Check::ok("u 2"),
+        );
+
+        assert!(!check.ok);
+        assert!(check.detail.contains("does not include hidden cursor mode"));
+    }
+
+    #[test]
+    fn remote_desktop_pointer_accepts_screencast_v1_default_hidden_cursor() {
+        let check = remote_desktop_pointer_check_from(
+            &remote_desktop_runtime_introspection(),
+            &screencast_runtime_introspection(),
+            &Check::ok("u 2"),
+            &Check::ok("u 1"),
+            &Check::ok("u 1"),
+            &Check::fail("AvailableCursorModes is not available on ScreenCast v1"),
+        );
+
+        assert!(check.ok);
+        assert!(check
+            .detail
+            .contains("hidden cursor mode is the interface default"));
+    }
+
+    #[test]
+    fn remote_desktop_portal_accepts_runtime_keyboard_contract() {
+        let check = remote_desktop_keyboard_check_from(
+            &remote_desktop_runtime_introspection(),
+            &Check::ok("u 3"),
+        );
+
+        assert!(check.ok);
+        assert!(check.detail.contains("AvailableDeviceTypes=3"));
+    }
+
+    #[test]
+    fn pointer_only_portal_remains_advertised_without_keyboard_readiness() {
+        let platform = platform_report();
+        let available_device_types = Check::ok("u 2");
+        let pointer = remote_desktop_pointer_check_from(
+            &remote_desktop_runtime_introspection(),
+            &screencast_runtime_introspection(),
+            &available_device_types,
+            &Check::ok("u 1"),
+            &Check::ok("u 2"),
+            &Check::ok("u 1"),
+        );
+        let keyboard = remote_desktop_keyboard_check_from(
+            &remote_desktop_runtime_introspection(),
+            &available_device_types,
+        );
+        let portals = portal_report_with_keyboard(pointer, keyboard.clone());
+        let accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
+        let windowing = windowing_report(true, true);
+        let input = input_report_parts(
+            Check::fail("missing ydotool"),
+            Check::fail("ydotoold not running"),
+            Check::fail("no connectable ydotool socket"),
+            Check::fail("/dev/uinput: Permission denied"),
+        );
+
+        let capabilities = capability_map(&platform, &portals, &accessibility, &windowing, &input);
+        let readiness = readiness_report(&platform, &portals, &accessibility, &windowing, &input);
+
+        assert!(portals.remote_desktop.ok);
+        assert!(!portals.remote_desktop_keyboard.ok);
+        assert!(capabilities.input.iter().any(|backend| backend == "portal"));
+        assert!(!readiness.can_send_development_input);
+    }
+
+    #[test]
+    fn capabilities_require_display_to_advertise_xdotool() {
+        let mut platform = platform_report();
+        platform.xdg_session_type = Some("x11".to_string());
+        platform.wayland_display = None;
+        platform.display = None;
+        let input = InputReport {
+            ydotool: Check::ok("ydotool"),
+            ydotoold: Check::ok("ydotoold"),
+            ydotool_socket: Check::ok("connectable"),
+            uinput: Check::fail("missing"),
+            xdotool: Check::ok("xdotool"),
+        };
+
+        let capabilities = capability_map(
+            &platform,
+            &portal_report(Check::fail("missing")),
+            &accessibility_report(Check::fail("missing"), Check::fail("missing")),
+            &windowing_report(false, false),
+            &input,
+        );
+
+        assert_eq!(capabilities.input, ["ydotool"]);
+        assert_eq!(capabilities.preferred.input.as_deref(), Some("ydotool"));
+    }
+
+    #[test]
+    fn xdotool_diagnostics_force_precedence_matches_runtime() {
+        let mut platform = platform_report();
+        platform.xdg_session_type = Some("wayland".to_string());
+        platform.display = Some(":0".to_string());
+        let mut input = input_report(false);
+        input.xdotool = Check::ok("xdotool");
+
+        assert!(should_advertise_xdotool(&platform, &input, false, true));
+        assert!(!should_advertise_xdotool(&platform, &input, true, true));
+        assert_eq!(
+            FORCE_XDOTOOL_KEYBOARD_ENV_KEYS,
+            [
+                "COMPUTER_USE_LINUX_FORCE_XDOTOOL_KEYBOARD",
+                "CODEX_COMPUTER_USE_FORCE_XDOTOOL_KEYBOARD"
+            ]
+        );
+        assert_eq!(
+            FORCE_YDOTOOL_KEYBOARD_ENV_KEYS,
+            [
+                "COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD",
+                "CODEX_COMPUTER_USE_FORCE_YDOTOOL_KEYBOARD"
+            ]
+        );
     }
 
     #[test]
@@ -1177,6 +2110,47 @@ mod tests {
     }
 
     #[test]
+    fn capability_map_reports_niri_window_control() {
+        let platform = platform_report();
+        let portals = portal_report(Check::fail("missing"));
+        let accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
+        let mut windowing = windowing_report(false, false);
+        windowing.niri = Check::ok("niri msg returned windows");
+        let input = input_report(false);
+
+        let capabilities = capability_map(&platform, &portals, &accessibility, &windowing, &input);
+
+        assert_eq!(capabilities.window_control, vec![NIRI_BACKEND]);
+        assert_eq!(
+            capabilities.preferred.window_control.as_deref(),
+            Some(NIRI_BACKEND)
+        );
+    }
+
+    #[test]
+    fn capability_map_rejects_incompatible_ydotool_with_live_daemon() {
+        let platform = platform_report();
+        let portals = portal_report(Check::fail("missing"));
+        let accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
+        let windowing = windowing_report(true, true);
+        let input = input_report_parts(
+            Check::fail("unsupported legacy ydotool CLI"),
+            Check::ok("ydotoold"),
+            Check::ok("connectable socket"),
+            Check::fail("/dev/uinput: Permission denied"),
+        );
+
+        let capabilities = capability_map(&platform, &portals, &accessibility, &windowing, &input);
+        let readiness = readiness_report(&platform, &portals, &accessibility, &windowing, &input);
+
+        assert!(!capabilities
+            .input
+            .iter()
+            .any(|backend| backend == "ydotool"));
+        assert!(!readiness.can_send_development_input);
+    }
+
+    #[test]
     fn readiness_message_mentions_generic_window_targeting() {
         let platform = platform_report();
         let accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
@@ -1226,7 +2200,30 @@ mod tests {
     }
 
     #[test]
-    fn readiness_accepts_direct_uinput_without_connectable_ydotool_socket() {
+    fn readiness_uses_connectable_ydotool_socket_when_process_probe_fails() {
+        let platform = platform_report();
+        let accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
+        let windowing = windowing_report(true, true);
+        let input = input_report_parts(
+            Check::ok("ydotool"),
+            Check::fail("ydotoold process name not found"),
+            Check::ok("connectable: /run/user/1000/.ydotool_socket"),
+            Check::fail("/dev/uinput: Permission denied"),
+        );
+        let portals = portal_report(Check::fail("missing"));
+
+        let capabilities = capability_map(&platform, &portals, &accessibility, &windowing, &input);
+        let readiness = readiness_report(&platform, &portals, &accessibility, &windowing, &input);
+
+        assert!(capabilities
+            .input
+            .iter()
+            .any(|backend| backend == "ydotool"));
+        assert!(readiness.can_send_development_input);
+    }
+
+    #[test]
+    fn wayland_readiness_rejects_pointer_only_uinput_without_keyboard_backend() {
         let platform = platform_report();
         let accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
         let windowing = windowing_report(true, true);
@@ -1245,8 +2242,39 @@ mod tests {
             &input,
         );
 
-        assert!(readiness.can_send_development_input);
-        assert!(readiness.blockers.is_empty());
+        assert!(!readiness.can_send_development_input);
+        assert!(readiness
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("absolute pointer input")));
+        assert!(readiness
+            .recommended_next_step
+            .contains("keyboard-capable input backend"));
+    }
+
+    #[test]
+    fn x11_readiness_rejects_pointer_only_uinput_without_keyboard_backend() {
+        let mut platform = platform_report();
+        platform.xdg_session_type = Some("x11".to_string());
+        platform.wayland_display = None;
+        let accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
+        let windowing = windowing_report(true, true);
+        let input = input_report_parts(
+            Check::fail("missing ydotool"),
+            Check::fail("ydotoold not running"),
+            Check::fail("no connectable ydotool socket"),
+            Check::ok("read/write: /dev/uinput"),
+        );
+
+        let readiness = readiness_report(
+            &platform,
+            &portal_report(Check::fail("missing")),
+            &accessibility,
+            &windowing,
+            &input,
+        );
+
+        assert!(!readiness.can_send_development_input);
     }
 
     #[test]
@@ -1296,15 +2324,15 @@ mod tests {
         assert!(!readiness.can_send_development_input);
         assert!(readiness
             .recommended_next_step
-            .contains("Enable a supported input backend"));
+            .contains("Enable a keyboard-capable input backend"));
         assert!(readiness
             .blockers
             .iter()
-            .any(|blocker| blocker.contains("Development input is unavailable")));
+            .any(|blocker| blocker.contains("Development keyboard input is unavailable")));
     }
 
     #[test]
-    fn ydotool_socket_check_requires_a_connectable_socket() {
+    fn ydotool_socket_check_rejects_legacy_stream_socket() {
         let dir = std::env::temp_dir().join(format!(
             "codex-computer-use-diagnostics-{}",
             std::process::id()
@@ -1317,7 +2345,7 @@ mod tests {
 
         let check = socket_connect_check(&socket);
 
-        assert!(check.ok, "{check:?}");
+        assert!(!check.ok, "{check:?}");
         drop(listener);
         let _ = std::fs::remove_dir_all(&dir);
     }

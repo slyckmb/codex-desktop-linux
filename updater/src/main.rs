@@ -1,13 +1,10 @@
-//! Binary entrypoint for the local Codex Desktop update manager.
+//! Binary entrypoint for the local ChatGPT Community update manager.
 
 mod app;
 mod builder;
 mod cache_cleanup;
-mod changelog;
 mod cli;
-mod codex_cli;
 mod config;
-mod feature_picker;
 mod install;
 mod install_rollback;
 mod liveness;
@@ -18,8 +15,6 @@ mod state;
 #[cfg(test)]
 mod test_util;
 mod upstream;
-mod wrapper;
-mod wrapper_apply;
 
 use anyhow::Result;
 use clap::Parser;

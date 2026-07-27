@@ -1,0 +1,45 @@
+{
+  "id": "ui-tweaks",
+  "title": "UI Tweaks",
+  "description": "Optional UI customization patches for ChatGPT Community.",
+  "defaultEnabled": false,
+  "entrypoints": {
+    "patchDescriptors": "./patch.js",
+    "stageHook": "./stage.sh"
+  },
+  "runtimeHooks": {
+    "prelaunch": {
+      "source": "sync-desktop-icon.sh",
+      "name": "dock-icon-cleanup.sh",
+      "mode": "0755"
+    }
+  },
+  "tweaks": {
+    "appearance": {
+      "dockIcon": {
+        "enabled": false
+      }
+    },
+    "home": {
+      "suggestedPrompts": {
+        "enabled": false
+      }
+    },
+    "modelPicker": {
+      "showModelsByDefault": {
+        "enabled": false
+      }
+    },
+    "reasoning": {
+      "keepEffortLabelsEnglish": {
+        "enabled": true
+      }
+    },
+    "sidebar": {
+      "projectName": {
+        "enabled": true,
+        "style": "font-weight: 700 !important;"
+      }
+    }
+  }
+}

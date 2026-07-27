@@ -1,45 +1,222 @@
 # Troubleshooting
 
-| Problem | Solution |
-|---|---|
-| `Error: write EPIPE` | Run `start.sh` directly instead of piping output |
-| Blank window | Check whether the configured webview port is already in use: `ss -tlnp \| grep -E '5175\|5176'` |
-| `ERR_CONNECTION_REFUSED` on the webview port | Ensure `python3` works and the configured port is free |
-| Stuck on Codex logo splash | Check `~/.cache/codex-desktop/launcher.log`; another process may be serving the webview port |
-| `CODEX_CLI_PATH` error | Reopen the app to retry automatic CLI install, or install manually with `npm i -g @openai/codex` / `npm i -g --prefix ~/.local @openai/codex` |
-| `nix run` exits with no window or terminal output | Check `~/.cache/codex-desktop/launcher.log`; the Nix package still requires a user-provided `codex` CLI |
-| `gh auth status` works in terminal but fails inside Codex Desktop | See [GitHub CLI auth in app-launched shells](github-cli-auth.md) |
-| Electron hangs while CLI is outdated | Re-run the launcher and check `~/.cache/codex-desktop/launcher.log` plus `~/.local/state/codex-update-manager/service.log` |
-| GPU / Vulkan / Wayland errors | Try `CODEX_LINUX_RENDERING_MODE=wayland-gpu ./codex-app/start.sh` |
-| Window flickering | Try `CODEX_ELECTRON_DISABLE_GPU_COMPOSITING=1 ./codex-app/start.sh`, then `./codex-app/start.sh --disable-gpu` if needed |
-| Sandbox errors | The launcher already sets `--no-sandbox` |
-| Stale install / cached DMG | `make build-app-fresh` removes the generated app and cached DMG, then downloads current upstream |
-| Computer Use plugin invisible in UI | Enable the Computer Use UI opt-in; upstream server/account rollout can still hide some controls |
-| Computer Use `doctor` reports no input backend | Grant `/dev/uinput`, enable XDG RemoteDesktop portal, or start `ydotoold` / `ydotool.service` |
-| Computer Use `doctor` reports `ydotool_socket: Permission denied` | Adjust the daemon socket so users in the `input` group can use it |
-| `ConnectTimeoutError` for Electron headers | Re-run `make build-app`; the installer uses `https://artifacts.electronjs.org/headers/dist` by default |
-| Computer Use AT-SPI tree empty | Run `codex-computer-use-linux setup`, then restart the target app |
-| `codex-update-manager` keeps running after package removal | Run `systemctl --user disable --now codex-update-manager.service` and confirm `/opt/codex-desktop` is gone |
+## Source verification fails
 
-## `/tmp` Mounted `noexec`
-
-Some hardened systems mount `/tmp` with `noexec`, which can prevent the Rust
-installer or bundled Node.js runtime from executing.
+Run the verifier test suite and inspect the generated metadata:
 
 ```bash
-mkdir -p ~/tmp/codex-work ~/tmp/codex-cache
-
-export TMPDIR=~/tmp/codex-work
-export XDG_CACHE_HOME=~/tmp/codex-cache
-
-# run install steps in this shell
+node --test scripts/lib/upstream-linux-package.test.js
+./install.sh --inspect --report-dir /tmp/codex-inspect
 ```
 
-## Useful Logs
+Do not bypass a signature or hash failure. Confirm system time, HTTPS access to
+`persistent.oaistatic.com`, `gpgv`, the pinned key fingerprint, and sufficient
+disk space. An explicit package must match host architecture and be named
+`chatgpt` in control metadata.
+
+## The app does not launch
 
 ```bash
-sed -n '1,160p' ~/.cache/codex-desktop/launcher.log
-sed -n '1,160p' ~/.local/state/codex-update-manager/service.log
-codex-update-manager status --json
+/opt/codex-desktop/start.sh --diagnose
+/opt/codex-desktop/ChatGPT --version
+journalctl --user -u codex-update-manager.service --no-pager
+```
+
+The diagnostic checks the official executable, ASAR, bundled `codex`, `rg`, and
+code-mode host. It also warns when Chromium sandbox prerequisites are missing.
+
+Also confirm that the installed package architecture matches the machine and
+that no official ChatGPT process is already holding the shared profile lock:
+
+```bash
+uname -m
+pgrep -a -f '(/ChatGPT|/chatgpt)' || true
+```
+
+Do not start the underlying `ChatGPT` binary directly for normal use. The
+`codex-desktop` wrapper supplies the correct desktop identity and enabled
+feature hooks.
+
+## Persistent Electron flags and native Wayland
+
+The launcher reads shared Electron flags from
+`${XDG_CONFIG_HOME:-$HOME/.config}/electron-flags.conf` and Community-specific
+flags from
+`${XDG_CONFIG_HOME:-$HOME/.config}/codex-desktop/electron-flags.conf`, in that
+order. Put one complete argument on each line; blank lines and lines beginning
+with `#` are ignored. App-specific flags are followed by enabled feature flags
+and explicit command-line arguments, so a later explicit argument can override
+an earlier setting.
+
+To force native Wayland rendering without editing a generated desktop entry:
+
+```bash
+mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/codex-desktop"
+printf '%s\n' '--ozone-platform=wayland' > \
+  "${XDG_CONFIG_HOME:-$HOME/.config}/codex-desktop/electron-flags.conf"
+```
+
+Restart every running official and Community process after changing the file.
+The launcher does not evaluate shell quoting or split a line into multiple
+arguments.
+
+## Chromium sandbox or AppArmor
+
+Prefer a native package, which installs an AppArmor profile adapted to
+`/opt/codex-desktop/ChatGPT`. AppImage intentionally refuses to disable the
+sandbox automatically. Enable unprivileged user namespaces according to your
+distribution policy or use the native package.
+
+If a native package was copied between systems, verify its adapted profile and
+reload AppArmor according to the distribution's tooling. Never solve a
+packaging error by globally disabling Chromium sandboxing.
+
+## Duplicate or stale desktop entries
+
+The official package should appear as **ChatGPT**. This project should appear
+as **ChatGPT Community** with a blue `C` mark. Confirm the selected entry:
+
+```bash
+grep -H '^Name=' \
+  /usr/share/applications/chatgpt.desktop \
+  /usr/share/applications/codex-desktop.desktop 2>/dev/null || true
+```
+
+After upgrading from an older package, refresh the desktop database or log out
+and in if your shell keeps stale names or icons. Do not rename the official
+desktop file to work around a shell cache.
+
+## Official and custom apps interfere
+
+Both use the upstream `Codex` profile. Fully exit the official `chatgpt` process
+before starting `codex-desktop`, and vice versa. Their packages and desktop
+entries can coexist, but upstream single-instance locking prevents reliable
+parallel sessions.
+
+In the desktop menu, the custom build is **ChatGPT Community** with a blue `C`;
+the unqualified **ChatGPT** entry is OpenAI's package.
+
+## Browser or Chrome plugin is visible but cannot connect
+
+The first Community launch after migrating from the legacy pre-official build
+refreshes cached Browser and Chrome plugins only when their bundled manifests
+match the official Linux plugins and they contain a known retired Linux-port
+marker. This one-time migration replaces the old custom Chrome extension host
+and fixes the old `/tmp/codex-browser-use-<uid>` discovery path; the official
+Linux runtime uses `/tmp/codex-browser-use`. It also removes legacy group-write
+permission from the private `.plugin-appserver` runtime directory, which the
+Chrome host rejects as an untrusted parent path.
+
+If Browser was already loaded before that migration ran, fully exit every
+ChatGPT process, fully exit Chrome/Chromium, start **ChatGPT Community**, and
+then reopen the browser. Arbitrary plugin caches and user-authored plugins are
+never rewritten.
+
+Clearing the entire browser profile or all Codex plugin caches is not a normal
+repair step. The official Browser/Chrome integration is already present in the
+Linux payload; this migration only replaces known snapshots created by the old
+community port.
+
+If the legacy snapshot predates the recognized migration markers, remove only
+the two re-creatable upstream-bundled caches, then restart Community followed
+by Chrome:
+
+```bash
+pkill -TERM -x ChatGPT 2>/dev/null || true
+rm -rf -- \
+  "${CODEX_HOME:-$HOME/.codex}/plugins/cache/openai-bundled/browser" \
+  "${CODEX_HOME:-$HOME/.codex}/plugins/cache/openai-bundled/chrome"
+chmod go-w "${CODEX_HOME:-$HOME/.codex}/plugins/.plugin-appserver" 2>/dev/null || true
+```
+
+Do not delete the whole `plugins` directory: it may contain user plugins and
+unrelated cached integrations.
+
+## A feature build fails after an upstream release
+
+Disable the feature in `linux-features/features.json` and rebuild to confirm the
+official baseline. Enabled feature drift deliberately blocks candidate
+promotion. Report the feature ID, package version/architecture, and patch report.
+
+Known retired feature IDs are ignored. A misspelled or arbitrary unknown ID is
+an error; correct the config rather than adding a compatibility alias.
+
+## Updater is waiting
+
+```bash
+codex-update-manager status
 systemctl --user status codex-update-manager.service
 ```
+
+`WaitingForAppExit` is expected: close all ChatGPT/Codex desktop processes. For
+a failed privileged install, run `codex-update-manager install-ready` after
+fixing the reported package-manager issue. Roll back with
+`codex-update-manager rollback`.
+
+Collect a useful updater report with:
+
+```bash
+codex-update-manager diagnose --json
+journalctl --user -u codex-update-manager.service -n 200 --no-pager
+```
+
+## Native package build or install fails
+
+Start by separating staging from packaging:
+
+```bash
+make build-app
+make package
+```
+
+If staging passes but packaging fails, confirm the distribution builder is
+installed and inspect the final lines for the selected deb/RPM/pacman command.
+If `sudo`-created files from an old checkout block cleanup, use the exact backup
+procedure below; do not rerun the whole build as root.
+
+For constrained systems, limit parallel compilation and compression:
+
+```bash
+MAX_BUILD_THREADS=2 make install-native
+```
+
+## Clean rebuild
+
+Generated state may be removed and rebuilt:
+
+```bash
+make clean-dist
+make build-app
+make package
+```
+
+Do not delete the updater rollback artifact unless you intentionally give up
+the recovery path.
+
+To remove only package artifacts, use `make clean-dist`. `make clean-state` is
+more destructive: it removes updater config/state/cache and therefore its
+managed rollback information.
+
+## Old app backup cannot be removed
+
+`codex-app.backup-*` directories are generated transactional backups, not
+source files or additional installed applications. A backup created by an old
+root-run build may be owned by root. Current builds collapse that cleanup
+failure to one warning and continue with the accepted candidate.
+
+Inspect the exact stale directories before changing or deleting anything:
+
+```bash
+find "$PWD" -maxdepth 1 -type d -name 'codex-app.backup-*' -print
+```
+
+For a confirmed stale path, replace `/absolute/path/to/backup` below with one
+exact path printed above:
+
+```bash
+sudo chown -R -- "$(id -u):$(id -g)" /absolute/path/to/backup
+rm -rf -- /absolute/path/to/backup
+```
+
+Never run the cleanup against the repository root, `codex-app/`, the active
+updater rollback artifact, `$HOME`, or a wildcard you have not inspected.

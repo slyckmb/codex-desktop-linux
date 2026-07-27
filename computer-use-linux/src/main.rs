@@ -1,5 +1,13 @@
+#[cfg(target_os = "linux")]
+use mimalloc::MiMalloc;
+
+#[cfg(target_os = "linux")]
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
 mod abs_pointer;
 mod atspi_tree;
+mod command_runner;
 mod cosmic_helper;
 mod diagnostics;
 mod gnome_extension;
@@ -10,6 +18,7 @@ mod server;
 mod terminal;
 mod windowing;
 mod windows;
+mod ydotool;
 
 use anyhow::{Context, Result};
 
@@ -48,9 +57,14 @@ async fn main() -> Result<()> {
         }
         Some("state") => {
             let app_name_or_bundle_identifier = std::env::args().nth(2);
-            let nodes =
-                atspi_tree::snapshot_tree(app_name_or_bundle_identifier.as_deref(), None, 120, 12)
-                    .await?;
+            let (max_nodes, max_depth) = atspi_tree::snapshot_limits(None, None);
+            let nodes = atspi_tree::snapshot_tree(
+                app_name_or_bundle_identifier.as_deref(),
+                None,
+                max_nodes,
+                max_depth,
+            )
+            .await?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&nodes)
