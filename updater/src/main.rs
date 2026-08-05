@@ -1,20 +1,32 @@
-//! Binary entrypoint for the local ChatGPT Community update manager.
+//! Binary entrypoint for the local ChatGPT Desktop update manager.
 
 mod app;
 mod builder;
 mod cache_cleanup;
+mod changelog;
 mod cli;
+mod cli_management;
+mod codex_cli;
 mod config;
+mod diagnostics;
+mod feature_picker;
+mod feature_snapshot;
 mod install;
 mod install_rollback;
 mod liveness;
 mod logging;
 mod notify;
+mod npm_cli_repair;
+mod operational_guard;
+mod outbox;
+mod restart;
 mod rollback;
 mod state;
 #[cfg(test)]
 mod test_util;
 mod upstream;
+mod wrapper;
+mod wrapper_apply;
 
 use anyhow::Result;
 use clap::Parser;
