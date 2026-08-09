@@ -84,6 +84,26 @@ pub struct BuildArtifacts {
     pub package_path: PathBuf,
 }
 
+/// Rebuilds the current upstream DMG into a Linux package.
+pub async fn build_update(
+    config: &RuntimeConfig,
+    state: &mut PersistedState,
+    paths: &RuntimePaths,
+    candidate_version: &str,
+    dmg_path: &Path,
+) -> Result<BuildArtifacts> {
+    build_update_from_with_feature_config(
+        &config.builder_bundle_root,
+        config,
+        state,
+        paths,
+        candidate_version,
+        dmg_path,
+        None,
+    )
+    .await
+}
+
 /// Rebuilds using an immutable candidate feature snapshot when supplied.
 pub async fn build_update_from_with_feature_config(
     bundle_source: &Path,
