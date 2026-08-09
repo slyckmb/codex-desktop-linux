@@ -25,11 +25,37 @@ PROBE_INTERVAL_SECONDS="${WATCHDOG_PROBE_INTERVAL_SECONDS:-3600}"
 # deepseek models, no read-only bubblewrap sandbox). Override with
 # WATCHDOG_WORKER_CLI=codex to fall back to codex exec.
 WORKER_CLI="${WATCHDOG_WORKER_CLI:-opencode}"
+# Dispatch mode. "background" (default) runs the worker detached with nohup so
+# the runner returns immediately and the worker is not killed by a parent
+# timeout; a chatrap signal is written on completion. "foreground" blocks.
+DISPATCH_MODE="${WATCHDOG_DISPATCH_MODE:-background}"
+# Optional chatrap signal delivery: when set, the runner writes ack/done/failed
+# signals under this directory (chatrap_signal_dir). Leave empty to disable.
+SIGNAL_DIR="${WATCHDOG_SIGNAL_DIR:-}"
+# Identifier used for the signal file name (defaults to the DMG sha prefix).
+SIGNAL_TASK="${WATCHDOG_SIGNAL_TASK:-watchdog}"
 
 log() {
   if [ -n "$LOG_FILE" ]; then
     printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >> "$LOG_FILE"
   fi
+}
+
+# Write a chatrap-style signal (ack/done/failed) under SIGNAL_DIR. Mirrors
+# chatrap_write_signal from chatrap-common.sh. No-op when SIGNAL_DIR is empty.
+write_signal() {
+  local signal_type="$1" status="$2" log_path="$3"
+  [ -n "$SIGNAL_DIR" ] || return 0
+  mkdir -p "$SIGNAL_DIR"
+  local file="${SIGNAL_DIR}/${SIGNAL_TASK}.${signal_type}"
+  {
+    printf 'SIGNAL_TYPE=%s\n' "$signal_type"
+    printf 'TASK_ID=%s\n' "$SIGNAL_TASK"
+    printf 'TIMESTAMP=%s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+    printf 'STATUS=%s\n' "$status"
+    printf 'LOG_PATH=%s\n' "$log_path"
+  } > "$file"
+  log "signal=$signal_type task=$SIGNAL_TASK file=$file"
 }
 
 STATE_ARGS=()
@@ -64,17 +90,56 @@ dispatch_worker() {
   local sha="$1"
   local prompt
   prompt="$(printf '%s' "$WORKER_PROMPT" | sed "s|REPO_ROOT|$REPO_ROOT|g; s|SHA256|$sha|g")"
-  log "dispatching worker for $sha"
-  # Run the model Worker non-interactively with full local filesystem access.
-  # opencode (default) runs with full permissions (--auto) and cheap deepseek
-  # models; codex exec is the fallback (--dangerously-bypass-approvals-and-sandbox
-  # because the default read-only bubblewrap sandbox forbids repo writes).
+  log "dispatching worker for $sha (mode=$DISPATCH_MODE)"
+  write_signal "ack" "started" "${LOG_FILE:-unknown}"
+
+  local worker_log="${LOG_FILE:-/tmp/codex-desktop-watchdog-worker.log}"
+  local cmd
   if [ "$WORKER_CLI" = "opencode" ]; then
-    opencode run --dir "$REPO_ROOT" --model "$MODEL" --auto --format json \
-      "$prompt" >> "$LOG_FILE" 2>&1 || log "opencode worker finished with non-zero exit for $sha"
+    cmd=(opencode run --dir "$REPO_ROOT" --model "$MODEL" --auto --format json "$prompt")
   else
-    codex exec -m "$MODEL" -C "$REPO_ROOT" --dangerously-bypass-approvals-and-sandbox "$prompt" \
-      >> "$LOG_FILE" 2>&1 || log "codex worker finished with non-zero exit for $sha"
+    cmd=(codex exec -m "$MODEL" -C "$REPO_ROOT" --dangerously-bypass-approvals-and-sandbox "$prompt")
+  fi
+
+  # Emit a done/failed signal after the worker process exits.
+  run_worker_bg() {
+    "${cmd[@]}" >> "$worker_log" 2>&1
+    local rc=$?
+    if [ "$rc" -eq 0 ]; then
+      write_signal "done" "success" "$worker_log"
+    else
+      write_signal "failed" "exit_${rc}" "$worker_log"
+    fi
+    return $rc
+  }
+
+  if [ "$DISPATCH_MODE" = "background" ]; then
+    # Run detached so a parent timeout / service restart does not kill the
+    # worker mid-repair. Export the signal + worker config so the background
+    # subshell can write completion signals. The signal file records completion
+    # for a watcher/lead.
+    export SIGNAL_DIR SIGNAL_TASK LOG_FILE worker_log
+    export WATCHDOG_CMD_BASH="${cmd[*]}"
+    nohup bash -c '
+      log() { [ -n "$LOG_FILE" ] && printf "%s %s\n" "$(date -u "+%Y-%m-%dT%H:%M:%SZ")" "$*" >> "$LOG_FILE"; }
+      write_signal() {
+        local t="$1" s="$2" lp="$3"
+        [ -n "$SIGNAL_DIR" ] || return 0
+        mkdir -p "$SIGNAL_DIR"
+        { printf "SIGNAL_TYPE=%s\n" "$t"; printf "TASK_ID=%s\n" "$SIGNAL_TASK"; \
+          printf "TIMESTAMP=%s\n" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"; \
+          printf "STATUS=%s\n" "$s"; printf "LOG_PATH=%s\n" "$lp"; } > "$SIGNAL_DIR/$SIGNAL_TASK.$t"
+        log "signal=$t task=$SIGNAL_TASK file=$SIGNAL_DIR/$SIGNAL_TASK.$t"
+      }
+      eval "${WATCHDOG_CMD_BASH}" >> "$worker_log" 2>&1
+      rc=$?
+      if [ "$rc" -eq 0 ]; then write_signal "done" "success" "$worker_log";
+      else write_signal "failed" "exit_${rc}" "$worker_log"; fi
+      exit "$rc"
+    ' >> /dev/null 2>&1 &
+    log "worker dispatched in background (pid $!)"
+  else
+    run_worker_bg
   fi
 }
 
@@ -103,10 +168,12 @@ main() {
   log "no dispatch needed ($output)"
 
   # ORPHAN RECOVERY: a CAMPAIGN_WAITING result can hide a campaign whose
-  # CHANGE_READY was acknowledged without a worker ever acquiring it. Detect
-  # that orphaned condition and dispatch the worker directly so the drift does
-  # not go unrepaired. Idempotent: the campaign's attempts/lease/nix state are
-  # all inspected, and the worker will no-op if the campaign is not acquirable.
+  # CHANGE_READY was acknowledged without a worker ever acquiring it, OR a
+  # campaign whose worker died mid-round (a non-terminal round exists but no
+  # lease is held). Both leave the drift unrepaired. Detect either and dispatch
+  # the worker directly so the drift does not go unrecovered. Idempotent: the
+  # campaign's lease/round state are inspected, and the worker will no-op if the
+  # campaign is not acquirable.
   if [[ "$output" == *"CAMPAIGN_WAITING"* ]]; then
     local orphan_sha
     orphan_sha="$(python3 "$WATCHDOG" status "${STATE_ARGS[@]}" 2>/dev/null \
@@ -114,12 +181,12 @@ main() {
              | .active_campaign.sha256 as $sha
              | select($p == "drift-validation" or $p == "detected")
              | select(.worker_lease == null)
-             # Orphaned: no real repair work started (no head/worktree/PR), and
-             # any round is only a stale 'active' shell left by a dead worker.
-             | select((.active_campaign.head_sha // null) == null)
-             | select((.active_campaign.worktree // null) == null)
              | select((.active_campaign.pr_number // null) == null)
-             | select((.active_campaign.repair_rounds // [] | map(select(.worktree == null and .head_sha == null and .pr_number == null)) | length) == (.active_campaign.repair_rounds // [] | length))
+             # Orphaned when no round shows real completion: either no round at
+             # all, or every round is an unfinished shell (no merged PR / not
+             # accepted-main / not completed). A worker death mid-round leaves a
+             # non-terminal round with no active lease -> recover it too.
+             | select((.active_campaign.repair_rounds // [] | map(select(.pr_number != null or .merge_sha != null or .accepted_head_sha != null)) | length) == 0)
              | $sha' 2>/dev/null || true)"
     if [ -n "$orphan_sha" ]; then
       log "orphaned campaign detected: $orphan_sha; dispatching worker"
