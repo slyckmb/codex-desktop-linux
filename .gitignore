@@ -31,3 +31,20 @@ AGENTS.override.md
 CLAUDE.md
 SESSION.md
 codex-desktop-linux.code-workspace
+
+# chatrap runtime state and trap files (never commit)
+.chatrap/
+.chatrap/logs/
+.chatrap/signals/
+.chatrap/artifacts/
+.chatrap/task-locks/
+session-ses_*.md
+/OPS.md
+/INIT.md
+/JOB-QUEUE.md
+/SESSION.md
+/QUICKSTART.md
+/REPO-MASTERY.md
+TASK-BRIEF.md
+STATUS.md
+CONFLICT-MAP.md
