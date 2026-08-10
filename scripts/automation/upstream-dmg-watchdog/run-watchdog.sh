@@ -44,8 +44,6 @@ NOTIFY_CHANNEL="${WATCHDOG_NOTIFY_CHANNEL:-}"
 # OpenClaw target for the notify channel (e.g. a Discord channel id or
 # "channel:ID"/"user:ID"). Required when NOTIFY_CHANNEL is set.
 NOTIFY_TARGET="${WATCHDOG_NOTIFY_TARGET:-}"
-# Whether to run the git upstream sync before dispatching the DMG worker.
-RUN_REPO_SYNC="${WATCHDOG_RUN_REPO_SYNC:-1}"
 
 log() {
   if [ -n "$LOG_FILE" ]; then
@@ -182,66 +180,52 @@ install_and_verify() {
 # (fetch upstream -> rebase -> push origin) but aborts and does NOT force-push
 # if the rebase hits a conflict. Returns 0 on success, non-zero on failure.
 # Safe-by-default: never pushes a conflicted/broken rebase.
-sync_repo() {
-  log "repo sync start"
-  if [ "$RUN_REPO_SYNC" != "1" ]; then
-    log "repo sync skipped (RUN_REPO_SYNC=$RUN_REPO_SYNC)"
-    return 0
-  fi
-  # Guard: never rebase the live main checkout. We rebase in a separate
-  # throwaway worktree so the user's working main is never left detached or
-  # half-rebased. The guard only ensures we know the base state.
-  local branch
-  branch="$(git -C "$REPO_ROOT" branch --show-current 2>/dev/null || true)"
-  if [ -z "$branch" ] || [ "$branch" != "main" ]; then
-    log "repo sync skipped (main checkout not on 'main': '$branch')"
-    return 3
-  fi
-  if [ -n "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null)" ]; then
-    log "repo sync skipped (main checkout dirty)"
-    return 3
-  fi
+# Safely check and report the fork's upstream sync status. Creates a throwaway
+# scratch worktree from origin/main, attempts a rebase onto upstream/main, and
+# reports ahead/behind counts plus whether the rebase was clean or conflicted.
+# Read-only: never modifies any branch, never pushes. Stays quiet when the fork
+# is clean; only notifies when there's a conflict or large divergence.
+check_upstream() {
+  log "check_upstream start"
+  local origin_head upstream_head
+  origin_head="$(git -C "$REPO_ROOT" rev-parse origin/main 2>/dev/null || true)"
+  [ -z "$origin_head" ] && return 4
 
   git -C "$REPO_ROOT" fetch upstream main >> "${LOG_FILE:-/dev/null}" 2>&1 || return 4
+  upstream_head="$(git -C "$REPO_ROOT" rev-parse upstream/main 2>/dev/null || true)"
+  [ -z "$upstream_head" ] && return 4
 
-  # Create a detached throwaway worktree from the current main HEAD.
-  local sync_wt
-  sync_wt="$(mktemp -d "${TMPDIR:-/tmp}/codex-sync-XXXXXX")"
-  if ! git -C "$REPO_ROOT" worktree add --detach "$sync_wt" main >> "${LOG_FILE:-/dev/null}" 2>&1; then
-    log "repo sync failed to create worktree"
-    rm -rf "$sync_wt"
+  local ahead behind
+  ahead="$(git -C "$REPO_ROOT" rev-list --count "$upstream_head".."$origin_head" 2>/dev/null || echo 0)"
+  behind="$(git -C "$REPO_ROOT" rev-list --count "$origin_head".."$upstream_head" 2>/dev/null || echo 0)"
+  log "check_upstream: origin/main ahead=$ahead behind=$behind vs upstream"
+
+  # Nothing new from upstream; nothing to report.
+  if [ "$behind" -eq 0 ]; then
+    log "check_upstream: fork is current"
+    return 0
+  fi
+
+  # Create a scratch worktree from origin/main and attempt a rebase to check
+  # for conflicts. On conflict we notify; on success we just log.
+  local scratch
+  scratch="$(mktemp -d "${TMPDIR:-/tmp}/codex-check-XXXXXX")"
+  if ! git -C "$REPO_ROOT" worktree add --detach "$scratch" origin/main >> "${LOG_FILE:-/dev/null}" 2>&1; then
+    rm -rf "$scratch"
     return 7
   fi
-  trap 'git -C "$REPO_ROOT" worktree remove --force "$sync_wt" 2>/dev/null || true; rm -rf "$sync_wt"' EXIT
+  trap 'git -C "$REPO_ROOT" worktree remove --force "$scratch" 2>/dev/null || true; rm -rf "$scratch"' EXIT
 
-  # Rebase the throwaway worktree onto upstream/main. If it conflicts, abort and
-  # do NOT touch main or push. The live main checkout is never disturbed.
-  if ! git -C "$sync_wt" rebase --rebase-merges upstream/main >> "${LOG_FILE:-/dev/null}" 2>&1; then
-    git -C "$sync_wt" rebase --abort >> "${LOG_FILE:-/dev/null}" 2>&1 || true
-    log "repo sync conflict in scratch worktree; no push, main untouched"
-    notify "codex-desktop upstream sync conflict" \
-      "The upstream git rebase (done in a scratch worktree) hit a conflict and was aborted. Your main checkout was NOT modified. Resolve the conflict manually and re-run the watchdog."
-    return 5
+  if git -C "$scratch" rebase --rebase-merges upstream/main >> "${LOG_FILE:-/dev/null}" 2>&1; then
+    git -C "$scratch" rebase --abort >> "${LOG_FILE:-/dev/null}" 2>&1 || true
+    log "check_upstream: rebase would be clean (ahead=$ahead behind=$behind)"
+    # Quiet when clean: no notification for routine healthy state.
+  else
+    git -C "$scratch" rebase --abort >> "${LOG_FILE:-/dev/null}" 2>&1 || true
+    log "check_upstream: rebase CONFLICTS (ahead=$ahead behind=$behind)"
+    notify "codex-desktop upstream diverged" \
+      "Your fork (origin/main) is $ahead ahead and $behind behind upstream. A rebase would conflict — upstream changes need manual attention."
   fi
-
-  # The scratch worktree is clean and rebased. Push the upstream-aligned head to
-  # origin/main with force-with-lease. We intentionally do NOT move the local
-  # `main` ref: main is checked out in the primary worktree, and moving the ref
-  # underneath a live checkout can detach it. Local main stays where the user
-  # left it; they fast-forward manually (or on the next convenient checkout).
-  local new_head
-  new_head="$(git -C "$sync_wt" rev-parse HEAD 2>/dev/null || true)"
-  if [ -z "$new_head" ]; then
-    log "repo sync could not read rebased head"
-    return 7
-  fi
-  git -C "$REPO_ROOT" push --force-with-lease origin "$new_head":main >> "${LOG_FILE:-/dev/null}" 2>&1
-  local push_rc=$?
-  if [ "$push_rc" -ne 0 ]; then
-    log "repo sync push failed (rc=$push_rc)"
-    return 6
-  fi
-  log "repo sync ok (origin/main -> $new_head; local main untouched)"
   return 0
 }
 
@@ -405,48 +389,17 @@ dispatch_worker() {
 main() {
   log "run start"
 
-  # Run the git repo sync and the DMG probe in parallel: both are network-heavy
-  # (fetch/rebase upstream + download/check the DMG). The probe downloads the
-  # DMG; sync_repo rebases the repo. They are independent.
-  local sync_rc probe_out
-  local sync_log probe_log
-  sync_log="$(mktemp)"; probe_log="$(mktemp)"
-  {
-    sync_repo
-    echo "SYNC_RC=$?" >&2
-  } >"$sync_log" 2>&1 &
-  local sync_pid=$!
-  {
-    run_probe
-    echo "PROBE_RC=$?" >&2
-  } >"$probe_log" 2>&1 &
-  local probe_pid=$!
+  # Run the DMG probe. The probe downloads and checks the upstream DMG;
+  # check_upstream is a separate, read-only git health check that never pushes
+  # or mutates any branch (it runs in a scratch worktree).
+  local probe_out probe_rc
+  probe_out="$(run_probe)"
+  probe_rc=$?
+  log "probe output: ${probe_out:-<none>} (rc=$probe_rc)"
 
-  wait "$probe_pid"
-  probe_out="$(grep -vE '^PROBE_RC=' "$probe_log" || true)"
-  local probe_rc
-  probe_rc="$(grep -oE '^PROBE_RC=[0-9]+' "$probe_log" | cut -d= -f2 || echo 0)"
-
-  wait "$sync_pid"
-  sync_rc="$(grep -oE '^SYNC_RC=[0-9]+' "$sync_log" | cut -d= -f2 || echo 0)"
-
-  local sync_lines
-  sync_lines="$(grep -vE '^SYNC_RC=' "$sync_log" || true)"
-  [ -n "$sync_lines" ] && log "repo sync log: $(echo "$sync_lines" | tr '\n' ' ')"
-  rm -f "$sync_log" "$probe_log"
-
-  log "probe output: ${probe_out:-<none>} (probe_rc=$probe_rc)"
-  log "repo sync rc=$sync_rc"
-
-  # Gate: the DMG worker builds from origin/main. If the repo sync failed
-  # (conflict/abort), do NOT launch the worker on a bad base. Bail + alert.
-  if [ -n "$sync_rc" ] && [ "$sync_rc" -ne 0 ]; then
-    log "repo sync failed; skipping DMG worker dispatch"
-    notify "codex-desktop watchdog: repo sync failed" \
-      "The upstream git sync failed (rc=$sync_rc); the DMG repair worker was NOT launched. See the runner log: ${LOG_FILE:-<none>}"
-    write_signal "failed" "repo_sync_rc_${sync_rc}" "${LOG_FILE:-unknown}"
-    return 1
-  fi
+  # Report fork health with upstream: silently logs ahead/behind counts and
+  # whether the fork would rebase cleanly. Notifies Discord only on conflict.
+  check_upstream || log "check_upstream returned non-zero"
 
   # CHANGE_READY <sha> EVENT_ID=<id>: drift detected, dispatch the worker.
   if [[ "$probe_out" =~ CHANGE_READY[[:space:]]+([0-9a-f]{64}) ]]; then

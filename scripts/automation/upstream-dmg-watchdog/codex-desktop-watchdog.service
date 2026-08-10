@@ -17,10 +17,6 @@ Environment=WATCHDOG_WORKER_CLI=openclaw
 # chatrap-style signal under WATCHDOG_SIGNAL_DIR.
 Environment=WATCHDOG_DISPATCH_MODE=background
 Environment=WATCHDOG_SIGNAL_DIR=%h/.local/state/codex-automations/upstream-dmg-watchdog/signals
-# Sync the fork with the upstream repo before dispatching the DMG worker, and
-# bail (with an email alert) if the rebase conflicts rather than building on a
-# bad base.
-Environment=WATCHDOG_RUN_REPO_SYNC=1
 Environment=WATCHDOG_ALERT_EMAIL=michael@localhost
 # Option C: also deliver success/failure notifications to the OpenClaw Discord
 # channel (the one already wired in openclaw's commands.ownerAllowFrom).
