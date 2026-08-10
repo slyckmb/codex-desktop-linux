@@ -44,6 +44,9 @@ NOTIFY_CHANNEL="${WATCHDOG_NOTIFY_CHANNEL:-}"
 # OpenClaw target for the notify channel (e.g. a Discord channel id or
 # "channel:ID"/"user:ID"). Required when NOTIFY_CHANNEL is set.
 NOTIFY_TARGET="${WATCHDOG_NOTIFY_TARGET:-}"
+# Path to the openclaw binary. Defaults to PATH lookup; set explicitly if
+# running under systemd (which has a restricted PATH).
+OPENCLAW_BIN="${OPENCLAW_BIN:-$(command -v openclaw 2>/dev/null || echo openclaw)}"
 
 log() {
   if [ -n "$LOG_FILE" ]; then
@@ -100,8 +103,8 @@ notify() {
   email_alert "$subject" "$body"
   if [ -n "$NOTIFY_CHANNEL" ] && [ -n "$NOTIFY_TARGET" ]; then
     local msg="${subject}\n\n${body}"
-    if command -v openclaw >/dev/null 2>&1; then
-      openclaw message send --channel "$NOTIFY_CHANNEL" -t "$NOTIFY_TARGET" -m "$msg" \
+    if [ -n "$OPENCLAW_BIN" ] && command -v "$OPENCLAW_BIN" >/dev/null 2>&1; then
+      "$OPENCLAW_BIN" message send --channel "$NOTIFY_CHANNEL" -t "$NOTIFY_TARGET" -m "$msg" \
         >> "${LOG_FILE:-/dev/null}" 2>&1 && log "notify sent via $NOTIFY_CHANNEL" \
         || log "notify failed via $NOTIFY_CHANNEL"
     else
@@ -326,8 +329,8 @@ dispatch_worker() {
       notify() {
         local subject="$1" body="$2"
         email_alert "$subject" "$body"
-        if [ -n "$NOTIFY_CHANNEL" ] && [ -n "$NOTIFY_TARGET" ] && command -v openclaw >/dev/null 2>&1; then
-          openclaw message send --channel "$NOTIFY_CHANNEL" -t "$NOTIFY_TARGET" \
+        if [ -n "$NOTIFY_CHANNEL" ] && [ -n "$NOTIFY_TARGET" ] && [ -n "$OPENCLAW_BIN" ] && command -v "$OPENCLAW_BIN" >/dev/null 2>&1; then
+          "$OPENCLAW_BIN" message send --channel "$NOTIFY_CHANNEL" -t "$NOTIFY_TARGET" \
             -m "${subject}\n\n${body}" >> "${LOG_FILE:-/dev/null}" 2>&1 || true
         fi
       }

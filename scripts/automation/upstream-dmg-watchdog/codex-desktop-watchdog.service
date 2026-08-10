@@ -18,6 +18,8 @@ Environment=WATCHDOG_WORKER_CLI=openclaw
 Environment=WATCHDOG_DISPATCH_MODE=background
 Environment=WATCHDOG_SIGNAL_DIR=%h/.local/state/codex-automations/upstream-dmg-watchdog/signals
 Environment=WATCHDOG_ALERT_EMAIL=michael@localhost
+# openclaw is under nvm, not in systemd's default PATH — give the full path.
+Environment=OPENCLAW_BIN=/home/michael/.nvm/versions/node/v24.19.0/bin/openclaw
 # Option C: also deliver success/failure notifications to the OpenClaw Discord
 # channel (the one already wired in openclaw's commands.ownerAllowFrom).
 Environment=WATCHDOG_NOTIFY_CHANNEL=discord
@@ -27,8 +29,7 @@ Environment=WATCHDOG_STATE_DIR=%h/.local/state/codex-automations/upstream-dmg-wa
 
 # Long timeout: the worker repair (build + patch re-target) can take a while.
 TimeoutStartSec=0
-Restart=on-failure
-RestartSec=60
+Restart=no
 
 [Install]
 WantedBy=timers.target
