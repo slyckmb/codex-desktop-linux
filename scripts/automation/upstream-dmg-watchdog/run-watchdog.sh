@@ -37,6 +37,13 @@ SIGNAL_TASK="${WATCHDOG_SIGNAL_TASK:-watchdog}"
 # Email alerting on bail/problems. Recipient (defaults to the updater's email
 # config). Set to empty to disable email alerts.
 ALERT_EMAIL="${WATCHDOG_ALERT_EMAIL:-}"
+# Optional OpenClaw channel delivery (Option C). When set to a channel name
+# (e.g. "discord"), the runner also sends notifications via that OpenClaw
+# channel. Set to empty to disable.
+NOTIFY_CHANNEL="${WATCHDOG_NOTIFY_CHANNEL:-}"
+# OpenClaw target for the notify channel (e.g. a Discord channel id or
+# "channel:ID"/"user:ID"). Required when NOTIFY_CHANNEL is set.
+NOTIFY_TARGET="${WATCHDOG_NOTIFY_TARGET:-}"
 # Whether to run the git upstream sync before dispatching the DMG worker.
 RUN_REPO_SYNC="${WATCHDOG_RUN_REPO_SYNC:-1}"
 
@@ -87,6 +94,26 @@ email_alert() {
   log "email_alert sent: $subject"
 }
 
+# Send a notification to the configured channel(s): email (if ALERT_EMAIL) and
+# OpenClaw channel (if NOTIFY_CHANNEL+NOTIFY_TARGET). Used for both success and
+# failure alerts.
+notify() {
+  local subject="$1" body="$2"
+  email_alert "$subject" "$body"
+  if [ -n "$NOTIFY_CHANNEL" ] && [ -n "$NOTIFY_TARGET" ]; then
+    local msg="${subject}\n\n${body}"
+    if command -v openclaw >/dev/null 2>&1; then
+      openclaw message send --channel "$NOTIFY_CHANNEL" -t "$NOTIFY_TARGET" -m "$msg" \
+        >> "${LOG_FILE:-/dev/null}" 2>&1 && log "notify sent via $NOTIFY_CHANNEL" \
+        || log "notify failed via $NOTIFY_CHANNEL"
+    else
+      log "notify skipped (openclaw not found)"
+    fi
+  else
+    log "notify skipped (no channel/target configured)"
+  fi
+}
+
 # Path to the installed update-manager binary.
 UPDATER_BIN="${UPDATER_BIN:-$REPO_ROOT/target/release/codex-update-manager}"
 
@@ -114,7 +141,7 @@ install_and_verify() {
     esac
     # 'failed' or unknown -> cannot install.
     if [[ "$st" == failed ]]; then
-      email_alert "codex-desktop update build failed" \
+      notify "codex-desktop update build failed" \
         "The update build failed (status=$st).\ncandidate=$candidate\ninstalled=$installed\n\nSee the runner log: ${LOG_FILE:-<none>}"
       write_signal "failed" "build_failed_status_${st}" "${LOG_FILE:-unknown}"
       return 1
@@ -125,7 +152,7 @@ install_and_verify() {
   # Trigger the install.
   if ! "$UPDATER_BIN" install-ready >> "${LOG_FILE:-/dev/null}" 2>&1; then
     log "install-ready failed"
-    email_alert "codex-desktop update install failed" \
+    notify "codex-desktop update install failed" \
       "The update install (install-ready) failed.\ncandidate=$candidate\ninstalled=$installed\n\nSee the runner log: ${LOG_FILE:-<none>}"
     write_signal "failed" "install_ready_failed" "${LOG_FILE:-unknown}"
     return 2
@@ -138,14 +165,14 @@ install_and_verify() {
   if [ "$after_installed" != "$candidate" ] && [ "$installed" = "$after_installed" ]; then
     # Installed version did not change -> install did not take effect.
     log "install did not advance installed version"
-    email_alert "codex-desktop update not installed" \
+    notify "codex-desktop update not installed" \
       "The update was built but the installed version did not advance.\ninstalled=$after_installed\ncandidate=$candidate\n\nSee the runner log: ${LOG_FILE:-<none>}"
     write_signal "failed" "install_no_advance" "${LOG_FILE:-unknown}"
     return 3
   fi
 
   log "install verified: installed=$after_installed"
-  email_alert "codex-desktop update installed successfully" \
+  notify "codex-desktop update installed successfully" \
     "The codex-desktop update installed successfully.\ninstalled_version=$after_installed\ncandidate_version=$candidate\nDMG sha: see runner log."
   write_signal "done" "installed_${after_installed}" "${LOG_FILE:-unknown}"
   return 0
@@ -180,7 +207,7 @@ sync_repo() {
     # Abort the conflicted rebase and restore the pre-rebase state. Do NOT push.
     log "repo sync conflict; aborting rebase (no push)"
     git -C "$REPO_ROOT" rebase --abort >> "${LOG_FILE:-/dev/null}" 2>&1 || true
-    email_alert "codex-desktop upstream sync conflict" \
+    notify "codex-desktop upstream sync conflict" \
       "The upstream git rebase in $REPO_ROOT hit a conflict and was aborted. The DMG worker was NOT launched. Resolve the conflict on main (git rebase --abort was already run) and re-run the watchdog."
     return 5
   fi
@@ -268,7 +295,7 @@ dispatch_worker() {
     # worker mid-repair. Export the signal + worker config so the background
     # subshell can write completion signals. After the worker succeeds, trigger
     # the install, verify it, and email the user on success/failure.
-    export SIGNAL_DIR SIGNAL_TASK LOG_FILE worker_log UPDATER_BIN ALERT_EMAIL
+    export SIGNAL_DIR SIGNAL_TASK LOG_FILE worker_log UPDATER_BIN ALERT_EMAIL NOTIFY_CHANNEL NOTIFY_TARGET
     export WATCHDOG_CMD_BASH="${cmd[*]}"
     nohup bash -c '
       log() { [ -n "$LOG_FILE" ] && printf "%s %s\n" "$(date -u "+%Y-%m-%dT%H:%M:%SZ")" "$*" >> "$LOG_FILE"; }
@@ -291,6 +318,14 @@ dispatch_worker() {
           printf "Date: %s\n" "$(date -R)"; printf "Content-Type: text/plain; charset=utf-8\n\n"; \
           printf "%s\n" "$body"; } | $mta -t -i 2>>"${LOG_FILE:-/dev/null}" || true
       }
+      notify() {
+        local subject="$1" body="$2"
+        email_alert "$subject" "$body"
+        if [ -n "$NOTIFY_CHANNEL" ] && [ -n "$NOTIFY_TARGET" ] && command -v openclaw >/dev/null 2>&1; then
+          openclaw message send --channel "$NOTIFY_CHANNEL" -t "$NOTIFY_TARGET" \
+            -m "${subject}\n\n${body}" >> "${LOG_FILE:-/dev/null}" 2>&1 || true
+        fi
+      }
       install_and_verify() {
         log "install_and_verify start"
         local installed candidate st
@@ -305,14 +340,14 @@ dispatch_worker() {
             BuildingPackage|PatchingApp|PreparingWorkspace|DownloadingDMG) sleep 15; attempts=$((attempts+1)); continue ;;
           esac
           if [ "$st" = "failed" ]; then
-            email_alert "codex-desktop update build failed" "The update build failed (status=$st). candidate=$candidate installed=$installed"
+            notify "codex-desktop update build failed" "The update build failed (status=$st). candidate=$candidate installed=$installed"
             write_signal "failed" "build_failed_${st}" "${LOG_FILE:-unknown}"
             return 1
           fi
           sleep 15; attempts=$((attempts+1))
         done
         if ! "$UPDATER_BIN" install-ready >> "${LOG_FILE:-/dev/null}" 2>&1; then
-          email_alert "codex-desktop update install failed" "install-ready failed. candidate=$candidate installed=$installed"
+          notify "codex-desktop update install failed" "install-ready failed. candidate=$candidate installed=$installed"
           write_signal "failed" "install_ready_failed" "${LOG_FILE:-unknown}"
           return 2
         fi
@@ -320,12 +355,12 @@ dispatch_worker() {
         after="$("$UPDATER_BIN" status 2>/dev/null | grep -oP "installed_version: \K.*" || echo unknown)"
         log "after install: installed=$after candidate=$candidate"
         if [ "$after" = "$installed" ] && [ "$after" != "$candidate" ]; then
-          email_alert "codex-desktop update not installed" "Installed version did not advance. installed=$after candidate=$candidate"
+          notify "codex-desktop update not installed" "Installed version did not advance. installed=$after candidate=$candidate"
           write_signal "failed" "install_no_advance" "${LOG_FILE:-unknown}"
           return 3
         fi
         log "install verified: installed=$after"
-        email_alert "codex-desktop update installed successfully" "Update installed. installed=$after candidate=$candidate"
+        notify "codex-desktop update installed successfully" "Update installed. installed=$after candidate=$candidate"
         write_signal "done" "installed_${after}" "${LOG_FILE:-unknown}"
         return 0
       }
@@ -336,7 +371,7 @@ dispatch_worker() {
         install_and_verify
       else
         write_signal "failed" "exit_${rc}" "$worker_log"
-        email_alert "codex-desktop watchdog worker failed" "The repair worker failed (rc=$rc). See: $worker_log"
+        notify "codex-desktop watchdog worker failed" "The repair worker failed (rc=$rc). See: $worker_log"
       fi
       exit "$rc"
     ' >> /dev/null 2>&1 &
@@ -386,7 +421,7 @@ main() {
   # (conflict/abort), do NOT launch the worker on a bad base. Bail + alert.
   if [ -n "$sync_rc" ] && [ "$sync_rc" -ne 0 ]; then
     log "repo sync failed; skipping DMG worker dispatch"
-    email_alert "codex-desktop watchdog: repo sync failed" \
+    notify "codex-desktop watchdog: repo sync failed" \
       "The upstream git sync failed (rc=$sync_rc); the DMG repair worker was NOT launched. See the runner log: ${LOG_FILE:-<none>}"
     write_signal "failed" "repo_sync_rc_${sync_rc}" "${LOG_FILE:-unknown}"
     return 1
