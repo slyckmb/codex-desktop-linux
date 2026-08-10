@@ -6,12 +6,12 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 # Run directly from the repo, outside any Codex automation sandbox.
-ExecStart=%h/dev/tools/codex-desktop-linux/scripts/automation/upstream-dmg-watchdog/run-watchdog.sh
+ExecStart=/home/michael/dev/tools/codex-desktop-linux/scripts/automation/upstream-dmg-watchdog/run-watchdog.sh
 Environment=WATCHDOG_LOG_FILE=%h/.local/state/codex-automations/upstream-dmg-watchdog/runner.log
-Environment=WATCHDOG_MODEL=cline-pass/cline-pass/deepseek-v4-flash
+Environment=WATCHDOG_MODEL=clinepass/cline-pass/deepseek-v4-flash
 Environment=WATCHDOG_REASONING=minimal
 # The worker is dispatched via the opencode client (cheap deepseek models).
-Environment=WATCHDOG_WORKER_CLI=opencode
+Environment=WATCHDOG_WORKER_CLI=openclaw
 # Dispatch the worker detached (nohup) so the service returns immediately and
 # the worker is not killed by a parent timeout. Completion is recorded via a
 # chatrap-style signal under WATCHDOG_SIGNAL_DIR.
@@ -22,6 +22,10 @@ Environment=WATCHDOG_SIGNAL_DIR=%h/.local/state/codex-automations/upstream-dmg-w
 # bad base.
 Environment=WATCHDOG_RUN_REPO_SYNC=1
 Environment=WATCHDOG_ALERT_EMAIL=michael@localhost
+# Option C: also deliver success/failure notifications to the OpenClaw Discord
+# channel (the one already wired in openclaw's commands.ownerAllowFrom).
+Environment=WATCHDOG_NOTIFY_CHANNEL=discord
+Environment=WATCHDOG_NOTIFY_TARGET=788869918954750012
 # The worker needs full local filesystem access to read/write the repo.
 Environment=WATCHDOG_STATE_DIR=%h/.local/state/codex-automations/upstream-dmg-watchdog
 
