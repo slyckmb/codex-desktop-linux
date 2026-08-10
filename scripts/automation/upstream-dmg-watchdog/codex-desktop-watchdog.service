@@ -1,0 +1,34 @@
+[Unit]
+Description=Codex Desktop upstream DMG watchdog (probe + repair dispatch)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Run directly from the repo, outside any Codex automation sandbox.
+ExecStart=%h/dev/tools/codex-desktop-linux/scripts/automation/upstream-dmg-watchdog/run-watchdog.sh
+Environment=WATCHDOG_LOG_FILE=%h/.local/state/codex-automations/upstream-dmg-watchdog/runner.log
+Environment=WATCHDOG_MODEL=cline-pass/cline-pass/deepseek-v4-flash
+Environment=WATCHDOG_REASONING=minimal
+# The worker is dispatched via the opencode client (cheap deepseek models).
+Environment=WATCHDOG_WORKER_CLI=opencode
+# Dispatch the worker detached (nohup) so the service returns immediately and
+# the worker is not killed by a parent timeout. Completion is recorded via a
+# chatrap-style signal under WATCHDOG_SIGNAL_DIR.
+Environment=WATCHDOG_DISPATCH_MODE=background
+Environment=WATCHDOG_SIGNAL_DIR=%h/.local/state/codex-automations/upstream-dmg-watchdog/signals
+# Sync the fork with the upstream repo before dispatching the DMG worker, and
+# bail (with an email alert) if the rebase conflicts rather than building on a
+# bad base.
+Environment=WATCHDOG_RUN_REPO_SYNC=1
+Environment=WATCHDOG_ALERT_EMAIL=michael@localhost
+# The worker needs full local filesystem access to read/write the repo.
+Environment=WATCHDOG_STATE_DIR=%h/.local/state/codex-automations/upstream-dmg-watchdog
+
+# Long timeout: the worker repair (build + patch re-target) can take a while.
+TimeoutStartSec=0
+Restart=on-failure
+RestartSec=60
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the Codex Desktop upstream DMG watchdog hourly
+After=network-online.target
+
+[Timer]
+# Start immediately, then every hour.
+OnBootSec=5min
+OnUnitActiveSec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

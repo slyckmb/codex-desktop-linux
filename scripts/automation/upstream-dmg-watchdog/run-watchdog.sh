@@ -87,6 +87,70 @@ email_alert() {
   log "email_alert sent: $subject"
 }
 
+# Path to the installed update-manager binary.
+UPDATER_BIN="${UPDATER_BIN:-$REPO_ROOT/target/release/codex-update-manager}"
+
+# Trigger the install of a ready update, verify it succeeded, and email the user
+# on success or failure. Returns 0 on success, non-zero on failure.
+install_and_verify() {
+  log "install_and_verify start"
+  local installed candidate
+  installed="$("$UPDATER_BIN" status 2>/dev/null | grep -oP 'installed_version: \K.*' || echo "unknown")"
+  candidate="$("$UPDATER_BIN" status 2>/dev/null | grep -oP 'candidate_version: \K.*' || echo "unknown")"
+  log "before install: installed=$installed candidate=$candidate"
+
+  # If the candidate is not ready (still building), wait briefly for it.
+  local attempts=0
+  while [ "$attempts" -lt 60 ]; do
+    local st
+    st="$("$UPDATER_BIN" status 2>/dev/null | grep -oP 'status: \K.*' || echo "unknown")"
+    # Statuses that mean the candidate is ready to install.
+    case "$st" in
+      ReadyToInstall|WaitingForAppExit|UpdateDetected|Idle)
+        break ;;
+      BuildingPackage|PatchingApp|PreparingWorkspace|DownloadingDMG)
+        log "candidate building (status=$st); waiting"
+        sleep 15; attempts=$((attempts+1)); continue ;;
+    esac
+    # 'failed' or unknown -> cannot install.
+    if [[ "$st" == failed ]]; then
+      email_alert "codex-desktop update build failed" \
+        "The update build failed (status=$st).\ncandidate=$candidate\ninstalled=$installed\n\nSee the runner log: ${LOG_FILE:-<none>}"
+      write_signal "failed" "build_failed_status_${st}" "${LOG_FILE:-unknown}"
+      return 1
+    fi
+    sleep 15; attempts=$((attempts+1))
+  done
+
+  # Trigger the install.
+  if ! "$UPDATER_BIN" install-ready >> "${LOG_FILE:-/dev/null}" 2>&1; then
+    log "install-ready failed"
+    email_alert "codex-desktop update install failed" \
+      "The update install (install-ready) failed.\ncandidate=$candidate\ninstalled=$installed\n\nSee the runner log: ${LOG_FILE:-<none>}"
+    write_signal "failed" "install_ready_failed" "${LOG_FILE:-unknown}"
+    return 2
+  fi
+
+  # Verify the installed version advanced to the candidate.
+  local after_installed
+  after_installed="$("$UPDATER_BIN" status 2>/dev/null | grep -oP 'installed_version: \K.*' || echo "unknown")"
+  log "after install: installed=$after_installed candidate=$candidate"
+  if [ "$after_installed" != "$candidate" ] && [ "$installed" = "$after_installed" ]; then
+    # Installed version did not change -> install did not take effect.
+    log "install did not advance installed version"
+    email_alert "codex-desktop update not installed" \
+      "The update was built but the installed version did not advance.\ninstalled=$after_installed\ncandidate=$candidate\n\nSee the runner log: ${LOG_FILE:-<none>}"
+    write_signal "failed" "install_no_advance" "${LOG_FILE:-unknown}"
+    return 3
+  fi
+
+  log "install verified: installed=$after_installed"
+  email_alert "codex-desktop update installed successfully" \
+    "The codex-desktop update installed successfully.\ninstalled_version=$after_installed\ncandidate_version=$candidate\nDMG sha: see runner log."
+  write_signal "done" "installed_${after_installed}" "${LOG_FILE:-unknown}"
+  return 0
+}
+
 # Safely sync the fork with the upstream repo. Runs `make sync-upstream`
 # (fetch upstream -> rebase -> push origin) but aborts and does NOT force-push
 # if the rebase hits a conflict. Returns 0 on success, non-zero on failure.
@@ -191,9 +255,9 @@ dispatch_worker() {
   if [ "$DISPATCH_MODE" = "background" ]; then
     # Run detached so a parent timeout / service restart does not kill the
     # worker mid-repair. Export the signal + worker config so the background
-    # subshell can write completion signals. The signal file records completion
-    # for a watcher/lead.
-    export SIGNAL_DIR SIGNAL_TASK LOG_FILE worker_log
+    # subshell can write completion signals. After the worker succeeds, trigger
+    # the install, verify it, and email the user on success/failure.
+    export SIGNAL_DIR SIGNAL_TASK LOG_FILE worker_log UPDATER_BIN ALERT_EMAIL
     export WATCHDOG_CMD_BASH="${cmd[*]}"
     nohup bash -c '
       log() { [ -n "$LOG_FILE" ] && printf "%s %s\n" "$(date -u "+%Y-%m-%dT%H:%M:%SZ")" "$*" >> "$LOG_FILE"; }
@@ -206,10 +270,63 @@ dispatch_worker() {
           printf "STATUS=%s\n" "$s"; printf "LOG_PATH=%s\n" "$lp"; } > "$SIGNAL_DIR/$SIGNAL_TASK.$t"
         log "signal=$t task=$SIGNAL_TASK file=$SIGNAL_DIR/$SIGNAL_TASK.$t"
       }
+      email_alert() {
+        local subject="$1" body="$2"
+        [ -n "$ALERT_EMAIL" ] || return 0
+        local mta=""
+        command -v msmtp >/dev/null 2>&1 && mta="msmtp" || [ -x /usr/sbin/sendmail ] && mta="/usr/sbin/sendmail"
+        [ -n "$mta" ] || return 0
+        { printf "To: %s\n" "$ALERT_EMAIL"; printf "Subject: %s\n" "$subject"; \
+          printf "Date: %s\n" "$(date -R)"; printf "Content-Type: text/plain; charset=utf-8\n\n"; \
+          printf "%s\n" "$body"; } | $mta -t -i 2>>"${LOG_FILE:-/dev/null}" || true
+      }
+      install_and_verify() {
+        log "install_and_verify start"
+        local installed candidate st
+        installed="$("$UPDATER_BIN" status 2>/dev/null | grep -oP "installed_version: \K.*" || echo unknown)"
+        candidate="$("$UPDATER_BIN" status 2>/dev/null | grep -oP "candidate_version: \K.*" || echo unknown)"
+        log "before install: installed=$installed candidate=$candidate"
+        local attempts=0
+        while [ "$attempts" -lt 60 ]; do
+          st="$("$UPDATER_BIN" status 2>/dev/null | grep -oP "status: \K.*" || echo unknown)"
+          case "$st" in
+            ReadyToInstall|WaitingForAppExit|UpdateDetected|Idle) break ;;
+            BuildingPackage|PatchingApp|PreparingWorkspace|DownloadingDMG) sleep 15; attempts=$((attempts+1)); continue ;;
+          esac
+          if [ "$st" = "failed" ]; then
+            email_alert "codex-desktop update build failed" "The update build failed (status=$st). candidate=$candidate installed=$installed"
+            write_signal "failed" "build_failed_${st}" "${LOG_FILE:-unknown}"
+            return 1
+          fi
+          sleep 15; attempts=$((attempts+1))
+        done
+        if ! "$UPDATER_BIN" install-ready >> "${LOG_FILE:-/dev/null}" 2>&1; then
+          email_alert "codex-desktop update install failed" "install-ready failed. candidate=$candidate installed=$installed"
+          write_signal "failed" "install_ready_failed" "${LOG_FILE:-unknown}"
+          return 2
+        fi
+        local after
+        after="$("$UPDATER_BIN" status 2>/dev/null | grep -oP "installed_version: \K.*" || echo unknown)"
+        log "after install: installed=$after candidate=$candidate"
+        if [ "$after" = "$installed" ] && [ "$after" != "$candidate" ]; then
+          email_alert "codex-desktop update not installed" "Installed version did not advance. installed=$after candidate=$candidate"
+          write_signal "failed" "install_no_advance" "${LOG_FILE:-unknown}"
+          return 3
+        fi
+        log "install verified: installed=$after"
+        email_alert "codex-desktop update installed successfully" "Update installed. installed=$after candidate=$candidate"
+        write_signal "done" "installed_${after}" "${LOG_FILE:-unknown}"
+        return 0
+      }
       eval "${WATCHDOG_CMD_BASH}" >> "$worker_log" 2>&1
       rc=$?
-      if [ "$rc" -eq 0 ]; then write_signal "done" "success" "$worker_log";
-      else write_signal "failed" "exit_${rc}" "$worker_log"; fi
+      if [ "$rc" -eq 0 ]; then
+        write_signal "done" "worker_success" "$worker_log"
+        install_and_verify
+      else
+        write_signal "failed" "exit_${rc}" "$worker_log"
+        email_alert "codex-desktop watchdog worker failed" "The repair worker failed (rc=$rc). See: $worker_log"
+      fi
       exit "$rc"
     ' >> /dev/null 2>&1 &
     log "worker dispatched in background (pid $!)"
