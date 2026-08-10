@@ -268,7 +268,7 @@ dispatch_worker() {
       local prompt_file
       prompt_file="$(mktemp)"
       printf '%s' "$prompt" > "$prompt_file"
-      cmd=(openclaw agent --agent main --local --model "$MODEL" --message-file "$prompt_file")
+      cmd=(openclaw agent --agent main --model "$MODEL" --message-file "$prompt_file")
       ;;
     opencode)
       cmd=(opencode run --dir "$REPO_ROOT" --model "$MODEL" --auto --format json "$prompt")
