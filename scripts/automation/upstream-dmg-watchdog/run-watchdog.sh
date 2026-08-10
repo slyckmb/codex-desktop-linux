@@ -21,10 +21,10 @@ MODEL="${WATCHDOG_MODEL:-cline-pass/cline-pass/deepseek-v4-flash}"
 REASONING="${WATCHDOG_REASONING:-minimal}"
 LOG_FILE="${WATCHDOG_LOG_FILE:-}"
 PROBE_INTERVAL_SECONDS="${WATCHDOG_PROBE_INTERVAL_SECONDS:-3600}"
-# CLI used to dispatch the repair worker. opencode is the default (cheap
-# deepseek models, no read-only bubblewrap sandbox). Override with
-# WATCHDOG_WORKER_CLI=codex to fall back to codex exec.
-WORKER_CLI="${WATCHDOG_WORKER_CLI:-opencode}"
+# CLI used to dispatch the repair worker. openclaw is the default (uses the
+# same cheap deepseek model + shell tools via the local gateway). Override with
+# WATCHDOG_WORKER_CLI=opencode (codex exec) or =codex.
+WORKER_CLI="${WATCHDOG_WORKER_CLI:-openclaw}"
 # Dispatch mode. "background" (default) runs the worker detached with nohup so
 # the runner returns immediately and the worker is not killed by a parent
 # timeout; a chatrap signal is written on completion. "foreground" blocks.
@@ -234,11 +234,22 @@ dispatch_worker() {
 
   local worker_log="${LOG_FILE:-/tmp/codex-desktop-watchdog-worker.log}"
   local cmd
-  if [ "$WORKER_CLI" = "opencode" ]; then
-    cmd=(opencode run --dir "$REPO_ROOT" --model "$MODEL" --auto --format json "$prompt")
-  else
-    cmd=(codex exec -m "$MODEL" -C "$REPO_ROOT" --dangerously-bypass-approvals-and-sandbox "$prompt")
-  fi
+  case "$WORKER_CLI" in
+    openclaw)
+      # Dispatch via the OpenClaw gateway agent (cheap deepseek model + shell
+      # tools). Temp file is used for the message to avoid arg-length issues.
+      local prompt_file
+      prompt_file="$(mktemp)"
+      printf '%s' "$prompt" > "$prompt_file"
+      cmd=(openclaw agent --agent main --local --model "$MODEL" --message-file "$prompt_file")
+      ;;
+    opencode)
+      cmd=(opencode run --dir "$REPO_ROOT" --model "$MODEL" --auto --format json "$prompt")
+      ;;
+    *)
+      cmd=(codex exec -m "$MODEL" -C "$REPO_ROOT" --dangerously-bypass-approvals-and-sandbox "$prompt")
+      ;;
+  esac
 
   # Emit a done/failed signal after the worker process exits.
   run_worker_bg() {
