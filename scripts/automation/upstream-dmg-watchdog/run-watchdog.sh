@@ -188,39 +188,60 @@ sync_repo() {
     log "repo sync skipped (RUN_REPO_SYNC=$RUN_REPO_SYNC)"
     return 0
   fi
-  # Guard: must be on main with a clean tree before rebasing.
+  # Guard: never rebase the live main checkout. We rebase in a separate
+  # throwaway worktree so the user's working main is never left detached or
+  # half-rebased. The guard only ensures we know the base state.
   local branch
   branch="$(git -C "$REPO_ROOT" branch --show-current 2>/dev/null || true)"
   if [ -z "$branch" ] || [ "$branch" != "main" ]; then
-    log "repo sync aborted (not on main: '$branch')"
+    log "repo sync skipped (main checkout not on 'main': '$branch')"
     return 3
   fi
   if [ -n "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null)" ]; then
-    log "repo sync aborted (dirty worktree)"
+    log "repo sync skipped (main checkout dirty)"
     return 3
   fi
 
   git -C "$REPO_ROOT" fetch upstream main >> "${LOG_FILE:-/dev/null}" 2>&1 || return 4
-  git -C "$REPO_ROOT" rebase --rebase-merges upstream/main >> "${LOG_FILE:-/dev/null}" 2>&1
-  local rc=$?
-  if [ "$rc" -ne 0 ]; then
-    # Abort the conflicted rebase and restore the pre-rebase state. Do NOT push.
-    log "repo sync conflict; aborting rebase (no push)"
-    git -C "$REPO_ROOT" rebase --abort >> "${LOG_FILE:-/dev/null}" 2>&1 || true
+
+  # Create a detached throwaway worktree from the current main HEAD.
+  local sync_wt
+  sync_wt="$(mktemp -d "${TMPDIR:-/tmp}/codex-sync-XXXXXX")"
+  if ! git -C "$REPO_ROOT" worktree add --detach "$sync_wt" main >> "${LOG_FILE:-/dev/null}" 2>&1; then
+    log "repo sync failed to create worktree"
+    rm -rf "$sync_wt"
+    return 7
+  fi
+  trap 'git -C "$REPO_ROOT" worktree remove --force "$sync_wt" 2>/dev/null || true; rm -rf "$sync_wt"' EXIT
+
+  # Rebase the throwaway worktree onto upstream/main. If it conflicts, abort and
+  # do NOT touch main or push. The live main checkout is never disturbed.
+  if ! git -C "$sync_wt" rebase --rebase-merges upstream/main >> "${LOG_FILE:-/dev/null}" 2>&1; then
+    git -C "$sync_wt" rebase --abort >> "${LOG_FILE:-/dev/null}" 2>&1 || true
+    log "repo sync conflict in scratch worktree; no push, main untouched"
     notify "codex-desktop upstream sync conflict" \
-      "The upstream git rebase in $REPO_ROOT hit a conflict and was aborted. The DMG worker was NOT launched. Resolve the conflict on main (git rebase --abort was already run) and re-run the watchdog."
+      "The upstream git rebase (done in a scratch worktree) hit a conflict and was aborted. Your main checkout was NOT modified. Resolve the conflict manually and re-run the watchdog."
     return 5
   fi
 
-  # Push only after a clean rebase (force-with-lease is safe: it won't clobber
-  # remote changes we haven't seen).
-  git -C "$REPO_ROOT" push --force-with-lease origin main >> "${LOG_FILE:-/dev/null}" 2>&1
+  # The scratch worktree is clean and rebased. Push the upstream-aligned head to
+  # origin/main with force-with-lease. We intentionally do NOT move the local
+  # `main` ref: main is checked out in the primary worktree, and moving the ref
+  # underneath a live checkout can detach it. Local main stays where the user
+  # left it; they fast-forward manually (or on the next convenient checkout).
+  local new_head
+  new_head="$(git -C "$sync_wt" rev-parse HEAD 2>/dev/null || true)"
+  if [ -z "$new_head" ]; then
+    log "repo sync could not read rebased head"
+    return 7
+  fi
+  git -C "$REPO_ROOT" push --force-with-lease origin "$new_head":main >> "${LOG_FILE:-/dev/null}" 2>&1
   local push_rc=$?
   if [ "$push_rc" -ne 0 ]; then
     log "repo sync push failed (rc=$push_rc)"
     return 6
   fi
-  log "repo sync ok"
+  log "repo sync ok (origin/main -> $new_head; local main untouched)"
   return 0
 }
 
