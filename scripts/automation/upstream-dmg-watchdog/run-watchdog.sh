@@ -19,6 +19,8 @@ WATCHDOG="$SCRIPT_DIR/watchdog.py"
 STATE_DIR="${WATCHDOG_STATE_DIR:-}"
 MODEL="${WATCHDOG_MODEL:-cline-pass/cline-pass/deepseek-v4-flash}"
 REASONING="${WATCHDOG_REASONING:-minimal}"
+# Worker command timeout in seconds. Repairs are 9-step and slow; keep generous.
+WORKER_TIMEOUT="${WATCHDOG_WORKER_TIMEOUT:-3600}"
 LOG_FILE="${WATCHDOG_LOG_FILE:-}"
 PROBE_INTERVAL_SECONDS="${WATCHDOG_PROBE_INTERVAL_SECONDS:-3600}"
 # CLI used to dispatch the repair worker. openclaw is the default (uses the
@@ -243,6 +245,8 @@ fi
 read -r -d '' WORKER_PROMPT <<'PROMPT' || true
 You are the dedicated Worker for the codex-desktop-linux upstream DMG watchdog at REPO_ROOT. Follow docs/upstream-dmg-watchdog.md exactly. A CHANGE_READY event was emitted for upstream DMG SHA: SHA256. Repair it:
 
+0. cd REPO_ROOT first — your working directory may not be the repo; run all commands from REPO_ROOT (or a managed worktree of it).
+
 1. Acquire the campaign with: python3 scripts/automation/upstream-dmg-watchdog/watchdog.py worker-acquire --sha SHA256
 2. Create a managed worktree from current origin/main; record it with campaign-update.
 3. Run sync-features once with the user's primary checkout as --source-checkout.
@@ -276,7 +280,7 @@ dispatch_worker() {
       local prompt_file
       prompt_file="$(mktemp)"
       printf '%s' "$prompt" > "$prompt_file"
-      cmd=(openclaw agent --agent main --model "$MODEL" --message-file "$prompt_file")
+      cmd=(openclaw agent --agent main --model "$MODEL" --thinking "$REASONING" --timeout "$WORKER_TIMEOUT" --message-file "$prompt_file")
       ;;
     opencode)
       cmd=(opencode run --dir "$REPO_ROOT" --model "$MODEL" --auto --format json "$prompt")
