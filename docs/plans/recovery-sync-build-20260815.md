@@ -235,3 +235,12 @@ _v0.3 — execution order; dsv4pro review only, no sync/build/force-push execute
 ## Phase 1 & 2 decisions (Michael, 2026-08-15 15:47)
 - **Updater model: ADOPT upstream** signed-Linux-package model. Fork wrapper-updater architecture surrendered; conflicts resolve toward upstream for updater/*, with fork-only wrapper files deleted. Rationale: lowest conflict + lowest forever-maintenance; recommended by dsv4pro.
 - **DMG: f8a5a74a** (last-accepted by watchdog, Aug 9). Build from this exact artifact.
+
+---
+
+## Phase 3 EXECUTED (2026-08-15)
+- Rebased `main` onto upstream/main: **28 ahead / 0 behind** (was 28/109).
+- Resolved all **13 conflicts** per ADOPT-upstream: updater/src/* adopted theirs (wrapper.rs/wrapper_apply.rs/codex-wrapper-updater deleted), install-deps.sh adopted upstream run_privileged + consolidated funcs, Makefile kept fork sync targets + adopted upstream structure.
+- Removed untracked fork-wrapper leftovers. Tree clean.
+- Smoke: bash -n install.sh/install-deps.sh OK; make parses OK.
+- NOTE: `main` is BRANCH-PROTECTED (no direct commits). Force-push to origin is the next gated step and REQUIRES Michael OK.
