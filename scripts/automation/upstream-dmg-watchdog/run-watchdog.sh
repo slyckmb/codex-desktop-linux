@@ -213,13 +213,17 @@ check_upstream() {
 
   # Create a scratch worktree from origin/main and attempt a rebase to check
   # for conflicts. On conflict we notify; on success we just log.
-  local scratch
+  local scratch=""
   scratch="$(mktemp -d "${TMPDIR:-/tmp}/codex-check-XXXXXX")"
   if ! git -C "$REPO_ROOT" worktree add --detach "$scratch" origin/main >> "${LOG_FILE:-/dev/null}" 2>&1; then
     rm -rf "$scratch"
     return 7
   fi
-  trap 'git -C "$REPO_ROOT" worktree remove --force "$scratch" 2>/dev/null || true; rm -rf "$scratch"' EXIT
+  # Guard the EXIT trap: `scratch` is function-local and therefore no longer
+  # set once this function returns. Under `set -u` a bare "$scratch" in the
+  # trap would throw an unbound-variable error and mark the oneshot unit as
+  # failed on teardown (clean body but exit 1). ${scratch:-} short-circuits.
+  trap 'if [ -n "${scratch:-}" ]; then git -C "$REPO_ROOT" worktree remove --force "$scratch" 2>/dev/null || true; rm -rf "$scratch"; fi' EXIT
 
   if git -C "$scratch" rebase --rebase-merges upstream/main >> "${LOG_FILE:-/dev/null}" 2>&1; then
     git -C "$scratch" rebase --abort >> "${LOG_FILE:-/dev/null}" 2>&1 || true
