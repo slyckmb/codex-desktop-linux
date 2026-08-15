@@ -123,3 +123,100 @@ Changes made (with evidence):
 6. **Added a DMG-freshness/acceptance tie-in** to Phase 2 and a watchdog-probe regression check to Phase 4.
 
 _v0.2 — reviewed & hardened; ready for Michael + dsv4pro phase-0 sign-off._
+
+
+---
+
+# Recommended Execution Order — recovery/sync/build/install (v0.3)
+
+**Author:** Fern (dsv4pro), 2026-08-15
+**Purpose:** A mechanically-executable, phase-by-phase sequence for the codex-desktop-linux
+recovery goal. Each phase = exact commands + stop/boundary condition + what dsv4pro reviews.
+
+## Live state (verified 2026-08-15 15:42, NOT assumed)
+- Branch `cr/openclaw-integration-fixes`, clean tree. Feature HEAD = `72e72a4`.
+- `upstream/main` = `e6b51d96` (moved +1 since v0.2: `Fix RPM GnuPG dependency on SUSE (#1363)` — RPM-only, unrelated to conflicts).
+- `origin/main` = `fc99c52`; local `main` = `fc99c52`.
+- Divergence: **28 ahead / 109 behind** (`git rev-list --left-right --count main...upstream/main`).
+- Conflicts: **13** (confirmed `merge-tree --write-tree`): Makefile, docs/updater.md, scripts/install-deps.sh, updater/src/{app,builder,cache_cleanup,cli,config,main,state}.rs, + modify/delete on updater/src/{wrapper,wrapper_apply}.rs and linux-features/codex-wrapper-updater/README.md.
+- DMG: repo `Codex.dmg`=33ad47 (Aug 5, stale); watchdog `last_observed`=ecffb6fc (Aug 15), `last_accepted`=f8a5a74a (Aug 9); worker_lease cleared.
+
+## The three ordering decisions (answered up front)
+
+**(a) DMG choice — decide EARLY (Phase 2), but it only gates the BUILD (Phase 6), not the sync.**
+The app binary comes from the DMG (extracted by `install.sh`), NOT compiled from repo source. So the DMG choice is independent of the sync and can be locked early without blocking anything. Recommend `f8a5a74a` (last-accepted) unless Michael wants the bleeding-edge `ecffb6fc`.
+
+**(b) Updater-model decision — FIRST (Phase 1), it is the linchpin.**
+Adopt upstream's signed-Linux-package model vs keep the fork's wrapper-updater. This single decision determines (1) how all 13 conflicts resolve — especially the 10 `updater/src/` content conflicts and 3 modify/deletes — and (2) what `cargo build -p codex-update-manager` actually produces. It must be made BEFORE any conflict resolution. It is a human architectural call, not a mechanical merge.
+
+**(c) Sync/force-push BEFORE build/install — sync first, always.**
+The updater binary is compiled from repo source, so it MUST build from synced code (not 109-behind main). Building the updater before syncing would produce an immediately-stale binary and force a rebuild. The app (from DMG) is sync-independent, but the updater is not. Sync → build → install is the only correct order.
+
+---
+
+## RECOMMENDED EXECUTION ORDER
+
+### Phase 0 — Safety snapshot & baseline (no decisions, pure safety)
+- [ ] `cd /home/michael/dev/tools/codex-desktop-linux`
+- [ ] `git status --porcelain` → must be empty (except ignored artifacts). Abort if dirty.
+- [ ] `git tag -a backup/prework-20260815 main -m "pre-sync baseline"`
+- [ ] `git tag -a backup/prework-20260815-feature HEAD -m "pre-sync feature baseline"`
+- [ ] Record checkpoint SHAs in the plan doc: origin/main=fc99c52, upstream/main=e6b51d96, feature HEAD=72e72a4, divergence=28/109, conflict=13.
+- **Boundary:** dsv4pro confirms tags exist + tree clean + SHAs recorded.
+
+### Phase 1 — Updater-model decision (THE linchpin — human decision)
+- [ ] Present Michael the adopt-vs-keep choice with evidence (upstream `47f6d69` deleted the fork's wrapper subsystem; 13 fork-only files).
+- [ ] Michael decides: **ADOPT upstream signed-package model** (recommended) or **KEEP fork wrapper model**.
+- [ ] Record the decision + rationale in the plan doc.
+- **Boundary:** Michael decides; dsv4pro reviews the decision's downstream implications (which conflicts resolve which way).
+
+### Phase 2 — DMG choice (independent; lock early)
+- [ ] Choose: `f8a5a74a` (accepted) / `ecffb6fc` (newest observed) / fresh download via `install.sh`.
+- [ ] Record choice + SHA. If using a watchdog DMG, `cp` it to repo root as `Codex.dmg`.
+- **Boundary:** dsv4pro confirms DMG choice + SHA recorded; build will use this exact artifact.
+
+### Phase 3 — Sync main onto upstream (resolve 13 conflicts per Phase 1 decision)
+- [ ] `git checkout main && git fetch upstream`
+- [ ] `git rebase --rebase-merges upstream/main` (stops at first conflict).
+- [ ] Resolve all 13 conflicts grouped: updater/src (10 content) + modify/deletes (3) per Phase 1; Makefile (keep fork's sync-upstream targets, take upstream build/feature); install-deps.sh (keep fork's dpkg robustness, take upstream run_privileged); docs/updater.md (rewrite to winning model).
+- [ ] `git log` sanity: upstream history intact, fork's 28 commits preserved, no fork-only file silently lost.
+- **Boundary (BLOCKER):** Michael reviews the resolved `git diff` + updater-model outcome; dsv4pro reviews before any push.
+
+### Phase 4 — Force-push main (safety-guarded)
+- [ ] Record pre-push SHA = `fc99c522a0bf959b29808b1667eb03009534eb31`.
+- [ ] `git push --force-with-lease=fc99c522a0bf959b29808b1667eb03009534eb31 origin main`
+- **Boundary:** dsv4pro confirms push succeeded + `origin/main` == local `main` == resolved tree.
+
+### Phase 5 — Rebase feature branch onto main
+- [ ] `git checkout cr/openclaw-integration-fixes && git rebase main`
+- [ ] Resolve any new conflicts (watchdog commits are small; upstream may touch scripts/automation).
+- **Boundary:** dsv4pro reviews the feature-branch rebase result.
+
+### Phase 6 — Build (from synced code + chosen DMG)
+- [ ] `./install.sh ./Codex.dmg` → `codex-app/` (watch DMG extract warnings, Electron/node download).
+- [ ] `cargo build --release -p codex-update-manager` (updater from synced source).
+- [ ] `./scripts/build-deb.sh` → `dist/*.deb`.
+- [ ] Validate: `bash -n` on shell scripts; `cargo test -p codex-update-manager`; confirm `.deb` produced + launcher markers.
+- **Boundary:** dsv4pro reviews build outputs + confirms not silently using a stale DMG.
+
+### Phase 7 — Install + updater service
+- [ ] Install the built `.deb` (or validate readiness without disrupting a running app).
+- [ ] Enable/confirm the systemd user updater service per `packaging/linux/` hooks.
+- [ ] Verify installed version/candidate state.
+- **Boundary:** dsv4pro reviews install state + service.
+
+### Phase 8 — Final verification + sitrep + commit
+- [ ] `git status` clean; commit remaining docs.
+- [ ] Verify watchdog still probes cleanly (no regression from sync/build).
+- [ ] Write results + next-steps to `docs/`; commit.
+- [ ] Final dsv4pro review + plain-language sitrep to Michael.
+
+---
+
+## Risk summary
+- **History rewrite** (Phase 4) is the highest-risk step; guarded by backup tags + `--force-with-lease=<sha>` + Michael BLOCKER in Phase 3.
+- **Updater-model decision** (Phase 1) is the highest-judgment step; must precede conflict resolution.
+- **Stale DMG** (Phase 2) must be forced; building from repo `Codex.dmg` (Aug 5) deviates from watchdog state.
+- **Order is non-negotiable:** sync → build → install (updater compiles from source; building pre-sync = wasted work).
+
+_v0.3 — execution order; dsv4pro review only, no sync/build/force-push executed._
