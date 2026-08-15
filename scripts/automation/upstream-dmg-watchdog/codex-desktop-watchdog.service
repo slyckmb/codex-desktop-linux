@@ -12,6 +12,9 @@ Environment=WATCHDOG_MODEL=clinepass/cline-pass/deepseek-v4-flash
 Environment=WATCHDOG_REASONING=minimal
 # The worker is dispatched via the opencode client (cheap deepseek models).
 Environment=WATCHDOG_WORKER_CLI=openclaw
+# Dispatch the repair worker to a DEDICATED agent (never 'main') so automated
+# runs can't collide with the interactive webchat/TUI session.
+Environment=WATCHDOG_WORKER_AGENT=watchdog
 # Dispatch the worker detached (nohup) so the service returns immediately and
 # the worker is not killed by a parent timeout. Completion is recorded via a
 # chatrap-style signal under WATCHDOG_SIGNAL_DIR.
