@@ -229,3 +229,9 @@ _v0.3 — execution order; dsv4pro review only, no sync/build/force-push execute
 - Divergence: 28 ahead / 109 behind
 - Conflicts (merge-tree): **13**
 - Tree clean (tracked).
+
+---
+
+## Phase 1 & 2 decisions (Michael, 2026-08-15 15:47)
+- **Updater model: ADOPT upstream** signed-Linux-package model. Fork wrapper-updater architecture surrendered; conflicts resolve toward upstream for updater/*, with fork-only wrapper files deleted. Rationale: lowest conflict + lowest forever-maintenance; recommended by dsv4pro.
+- **DMG: f8a5a74a** (last-accepted by watchdog, Aug 9). Build from this exact artifact.
