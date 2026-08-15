@@ -79,16 +79,23 @@ write_signal() {
   log "signal=$signal_type task=$SIGNAL_TASK file=$file"
 }
 
-# Email the user when the runner bails or hits a problem. Uses the configured
-# sendmail/msmtp. No-op when ALERT_EMAIL is empty or msmtp/sendmail is missing.
+# Email the user when the runner bails or hits a problem. Delivers through the
+# local MTA when available, falling back to msmtp. No-op when ALERT_EMAIL is
+# empty or no MTA is found.
+#
+# Prefer local sendmail (postfix) FIRST: on this host postfix runs and
+# /etc/aliases forwards michael@localhost to the real inbox (braband@gmail.com),
+# so local delivery reaches Michael with NO credentials, gpg, or TTY — it works
+# headlessly under systemd. msmtp is a fallback only (its gpg-backed
+# passwordeval needs a TTY/cached passphrase and historically 535-fails).
 email_alert() {
   local subject="$1" body="$2"
   [ -n "$ALERT_EMAIL" ] || { log "email_alert skipped (no ALERT_EMAIL)"; return 0; }
   local mta=""
-  if command -v msmtp >/dev/null 2>&1; then
-    mta="msmtp"
-  elif [ -x /usr/sbin/sendmail ]; then
+  if [ -x /usr/sbin/sendmail ]; then
     mta="/usr/sbin/sendmail"
+  elif command -v msmtp >/dev/null 2>&1; then
+    mta="msmtp"
   else
     log "email_alert skipped (no MTA)"
     return 0
@@ -357,7 +364,7 @@ dispatch_worker() {
         local subject="$1" body="$2"
         [ -n "$ALERT_EMAIL" ] || return 0
         local mta=""
-        command -v msmtp >/dev/null 2>&1 && mta="msmtp" || [ -x /usr/sbin/sendmail ] && mta="/usr/sbin/sendmail"
+        [ -x /usr/sbin/sendmail ] && mta="/usr/sbin/sendmail" || (command -v msmtp >/dev/null 2>&1 && mta="msmtp")
         [ -n "$mta" ] || return 0
         { printf "To: %s\n" "$ALERT_EMAIL"; printf "Subject: %s\n" "$subject"; \
           printf "Date: %s\n" "$(date -R)"; printf "Content-Type: text/plain; charset=utf-8\n\n"; \
