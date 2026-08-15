@@ -27,6 +27,12 @@ PROBE_INTERVAL_SECONDS="${WATCHDOG_PROBE_INTERVAL_SECONDS:-3600}"
 # same cheap deepseek model + shell tools via the local gateway). Override with
 # WATCHDOG_WORKER_CLI=opencode (codex exec) or =codex.
 WORKER_CLI="${WATCHDOG_WORKER_CLI:-openclaw}"
+# Agent id used for the openclaw worker dispatch. Defaults to a DEDICATED
+# 'watchdog' agent (created via `openclaw agents add watchdog`) so automated
+# runs never collide with the interactive 'main' session. DO NOT point this at
+# 'main' while a live webchat/TUI session is bound to it — concurrent writers
+# race the same session JSONL and abort with EmbeddedAttemptSessionTakeoverError.
+WORKER_AGENT="${WATCHDOG_WORKER_AGENT:-watchdog}"
 # Dispatch mode. "background" (default) runs the worker detached with nohup so
 # the runner returns immediately and the worker is not killed by a parent
 # timeout; a chatrap signal is written on completion. "foreground" blocks.
@@ -225,15 +231,38 @@ check_upstream() {
   # failed on teardown (clean body but exit 1). ${scratch:-} short-circuits.
   trap 'if [ -n "${scratch:-}" ]; then git -C "$REPO_ROOT" worktree remove --force "$scratch" 2>/dev/null || true; rm -rf "$scratch"; fi' EXIT
 
+  # Divergence notifier backoff: only alert when the conflict signature changed
+  # since the last run. Writes the "ahead/behind + clean-or-conflict" state to a
+  # small file under STATE_DIR so a persistent divergence pings Discord/email
+  # once, not once an hour. On state change (incl. resolving to clean) we record
+  # the new signature and (for a new conflict) notify.
+  local state_file="${STATE_DIR:-/tmp}/check_upstream.state"
+  # Simpler, stable signature: track whether this run conflicted + ahead/behind.
+  local conflict=0
   if git -C "$scratch" rebase --rebase-merges upstream/main >> "${LOG_FILE:-/dev/null}" 2>&1; then
     git -C "$scratch" rebase --abort >> "${LOG_FILE:-/dev/null}" 2>&1 || true
     log "check_upstream: rebase would be clean (ahead=$ahead behind=$behind)"
-    # Quiet when clean: no notification for routine healthy state.
+    conflict=0
   else
     git -C "$scratch" rebase --abort >> "${LOG_FILE:-/dev/null}" 2>&1 || true
     log "check_upstream: rebase CONFLICTS (ahead=$ahead behind=$behind)"
-    notify "codex-desktop upstream diverged" \
-      "Your fork (origin/main) is $ahead ahead and $behind behind upstream. A rebase would conflict — upstream changes need manual attention."
+    conflict=1
+  fi
+  # key = "conflict-state", value = "ahead/behind" (so a clean->conflict or
+  # a material ahead/behind change re-alerts, but steady-state stays quiet).
+  local state_key="${conflict}:${ahead}/${behind}"
+  local prev=""
+  [ -f "$state_file" ] && prev="$(cat "$state_file" 2>/dev/null || true)"
+  if [ "$prev" != "$state_key" ]; then
+    printf '%s' "$state_key" > "$state_file"
+    if [ "$conflict" -eq 1 ]; then
+      notify "codex-desktop upstream diverged" \
+        "Your fork (origin/main) is $ahead ahead and $behind behind upstream. A rebase would conflict — upstream changes need manual attention."
+    else
+      log "check_upstream: resolved to clean; cleared divergence alert state"
+    fi
+  else
+    log "check_upstream: divergence state unchanged ($state_key); suppressing repeat alert"
   fi
   return 0
 }
@@ -284,7 +313,7 @@ dispatch_worker() {
       local prompt_file
       prompt_file="$(mktemp)"
       printf '%s' "$prompt" > "$prompt_file"
-      cmd=(openclaw agent --agent main --model "$MODEL" --thinking "$REASONING" --timeout "$WORKER_TIMEOUT" --message-file "$prompt_file")
+      cmd=(openclaw agent --agent "$WORKER_AGENT" --model "$MODEL" --thinking "$REASONING" --timeout "$WORKER_TIMEOUT" --message-file "$prompt_file")
       ;;
     opencode)
       cmd=(opencode run --dir "$REPO_ROOT" --model "$MODEL" --auto --format json "$prompt")
