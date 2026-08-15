@@ -244,3 +244,9 @@ _v0.3 — execution order; dsv4pro review only, no sync/build/force-push execute
 - Removed untracked fork-wrapper leftovers. Tree clean.
 - Smoke: bash -n install.sh/install-deps.sh OK; make parses OK.
 - NOTE: `main` is BRANCH-PROTECTED (no direct commits). Force-push to origin is the next gated step and REQUIRES Michael OK.
+
+---
+
+## Phase 4 & 5 EXECUTED (2026-08-15)
+- **Phase 4:** Pushed rebased main to origin (fork only, NOT upstream): `fc99c52...472adf4 main -> main (forced update)`. Lease-guarded `--force-with-lease=main:<sha>`. Verified origin/main==local main; upstream/main untouched.
+- **Phase 5:** Rebased feature branch `cr/openclaw-integration-fixes` onto synced main. Resolved remaining wrapper-file conflicts per adopt-upstream (deleted). Now **11 ahead / 0 behind** main, clean tree.
