@@ -220,3 +220,12 @@ The updater binary is compiled from repo source, so it MUST build from synced co
 - **Order is non-negotiable:** sync → build → install (updater compiles from source; building pre-sync = wasted work).
 
 _v0.3 — execution order; dsv4pro review only, no sync/build/force-push executed._
+
+---
+
+## Phase 0 checkpoint (executed 2026-08-15 15:4x)
+- Backup tags: `backup/prework-20260815` (main), `backup/prework-20260815-feature` (feature HEAD)
+- origin/main=`fc99c52` upstream/main=`e6b51d9` local main=`fc99c52` feature HEAD=`c5c5b09`
+- Divergence: 28 ahead / 109 behind
+- Conflicts (merge-tree): **13**
+- Tree clean (tracked).
